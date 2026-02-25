@@ -1,0 +1,7 @@
+# Compiled binaries
+/mcp
+/simple
+/stream
+/session
+/system_prompt
+*.exe
