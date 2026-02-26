@@ -495,6 +495,17 @@ func WithBypassPermissions() Option {
 	}
 }
 
+// WithDefaultPermissions restores normal (non-bypass) permission mode, overriding
+// the SDK defaults of bypassPermissions + AllowDangerouslySkipPermissions.
+// Use this together with WithPermissionHandler so the subprocess sends
+// can_use_tool control_requests that the handler can intercept.
+func WithDefaultPermissions() Option {
+	return func(o *Options) {
+		o.PermissionMode = PermissionModeDefault
+		o.AllowDangerouslySkipPermissions = false
+	}
+}
+
 // WithPermissionPromptToolName sets the MCP tool name used for permission prompts.
 func WithPermissionPromptToolName(name string) Option {
 	return func(o *Options) { o.PermissionPromptToolName = name }
