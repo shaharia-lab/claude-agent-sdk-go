@@ -62,6 +62,21 @@ func (s *Stream) Interrupt() error {
 	return nil
 }
 
+// Close gracefully shuts down the stream. It is equivalent to Interrupt and is
+// idempotent. Provided as a more semantically appropriate name when using Session.
+func (s *Stream) Close() error {
+	s.interrupt()
+	return nil
+}
+
+// SendUserMessage injects an additional user message into the running subprocess.
+// In single-turn (Query/Run) usage this can be called mid-stream (before TypeResult
+// is emitted) to inject extra context — matching TypeScript's streamInput().
+// For persistent multi-turn usage prefer Session.Send which wraps this method.
+func (s *Stream) SendUserMessage(msg string) error {
+	return s.write(userMsg(msg))
+}
+
 // sendControlRequest writes a control_request with the given subtype and extra
 // fields, then blocks until a matching control_response arrives or the ctx
 // is cancelled.

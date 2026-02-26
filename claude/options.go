@@ -387,6 +387,11 @@ type Options struct {
 
 	// ClaudeExecutable is the path to the claude binary. Defaults to "claude".
 	ClaudeExecutable string
+
+	// sessionMode is set internally by NewSession; not exposed as a public Option.
+	// When true, the subprocess stays alive across multiple turns (stdin is not
+	// closed after TypeResult) and the caller drives the conversation via Send().
+	sessionMode bool
 }
 
 // Option is a functional option for configuring a Query call.
