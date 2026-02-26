@@ -374,6 +374,13 @@ type Options struct {
 	// Each plugin directory must contain a .claude-plugin/plugin.json manifest.
 	Plugins []SdkPluginConfig
 
+	// Settings passes a settings file path or an inline JSON string to the
+	// subprocess via --settings. When set to a file path the CLI loads that
+	// file directly; when set to a JSON object string the CLI uses it as the
+	// settings payload. Mutually exclusive with SettingSources: if both are
+	// set, Settings takes precedence and SettingSources is ignored.
+	Settings string
+
 	// SettingSources controls which settings files are loaded by the subprocess.
 	// When empty, no filesystem settings are loaded (SDK isolation mode).
 	SettingSources []SettingSource
@@ -542,6 +549,15 @@ func WithPlugins(plugins ...SdkPluginConfig) Option {
 	return func(o *Options) { o.Plugins = append(o.Plugins, plugins...) }
 }
 
+// WithSettings passes a settings file path or an inline JSON string to the
+// subprocess via --settings. Accepts either an absolute/relative path to a
+// settings.json file or a raw JSON object string (e.g.
+// `{"permissions":{"allow":["Bash"]}}`).
+// When set, SettingSources is ignored.
+func WithSettings(s string) Option {
+	return func(o *Options) { o.Settings = s }
+}
+
 // WithSettingSources controls which settings files are loaded by the subprocess.
 // Pass one or more of SettingSourceUser, SettingSourceProject, SettingSourceLocal.
 // When not called, no filesystem settings are loaded (SDK isolation mode).
@@ -681,9 +697,13 @@ func (o *Options) buildArgs() []string {
 		}
 	}
 
-	// SettingSources: comma-separated list passed to --setting-sources.
-	// When empty the subprocess loads no filesystem settings (SDK isolation mode).
-	if len(o.SettingSources) > 0 {
+	// Settings: file path or inline JSON passed to --settings.
+	// When set, --setting-sources is skipped (Settings takes precedence).
+	if o.Settings != "" {
+		args = append(args, "--settings", o.Settings)
+	} else if len(o.SettingSources) > 0 {
+		// SettingSources: comma-separated list passed to --setting-sources.
+		// When empty the subprocess loads no filesystem settings (SDK isolation mode).
 		srcs := make([]string, len(o.SettingSources))
 		for i, s := range o.SettingSources {
 			srcs[i] = string(s)
