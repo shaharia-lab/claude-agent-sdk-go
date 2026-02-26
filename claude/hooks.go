@@ -8,9 +8,13 @@ type HookEvent string
 const (
 	HookEventPreToolUse       HookEvent = "PreToolUse"
 	HookEventPostToolUse      HookEvent = "PostToolUse"
+	// HookEventPostToolUseFailure fires after a tool call fails.
+	HookEventPostToolUseFailure HookEvent = "PostToolUseFailure"
 	HookEventNotification     HookEvent = "Notification"
 	HookEventStop             HookEvent = "Stop"
 	HookEventSubagentStop     HookEvent = "SubagentStop"
+	// HookEventSubagentStart fires when a sub-agent is started.
+	HookEventSubagentStart    HookEvent = "SubagentStart"
 	HookEventPreCompact       HookEvent = "PreCompact"
 	HookEventUserPromptSubmit HookEvent = "UserPromptSubmit"
 	HookEventStart            HookEvent = "Start"
@@ -19,6 +23,8 @@ const (
 	HookEventPreEdit          HookEvent = "PreEdit"
 	HookEventPostEdit         HookEvent = "PostEdit"
 	HookEventSetup            HookEvent = "Setup"
+	// HookEventPermissionRequest fires when Claude requests permission to use a tool.
+	HookEventPermissionRequest HookEvent = "PermissionRequest"
 )
 
 // HookOutput is the return value of a HookFunc. All fields are optional.

@@ -136,6 +136,11 @@ type Result struct {
 	UUID          string      `json:"uuid"`
 	// Populated when IsError is true.
 	Errors []string `json:"errors,omitempty"`
+	// StructuredOutput holds parsed structured output when an OutputFormat
+	// with type "json" or "json_schema" was requested.
+	StructuredOutput any `json:"structured_output,omitempty"`
+	// PermissionDenials lists any tool calls that were denied during the run.
+	PermissionDenials []string `json:"permission_denials,omitempty"`
 }
 
 // ─── System message ────────────────────────────────────────────────────────────
@@ -163,6 +168,13 @@ type SystemMessage struct {
 	PermissionMode    string   `json:"permissionMode,omitempty"`
 	ClaudeCodeVersion string   `json:"claude_code_version,omitempty"`
 	APIKeySource      string   `json:"apiKeySource,omitempty"`
+
+	// Additional init fields populated by newer CLI versions.
+	Agents        []string `json:"agents,omitempty"`
+	Betas         []string `json:"betas,omitempty"`
+	Skills        []string `json:"skills,omitempty"`
+	Plugins       []string `json:"plugins,omitempty"`
+	SlashCommands []string `json:"slash_commands,omitempty"`
 }
 
 // ─── Top-level Event ──────────────────────────────────────────────────────────
