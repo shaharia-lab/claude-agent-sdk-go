@@ -26,6 +26,8 @@ const (
 	EffortLow    EffortLevel = "low"
 	EffortMedium EffortLevel = "medium"
 	EffortHigh   EffortLevel = "high"
+	// EffortMax requests the highest possible reasoning effort.
+	EffortMax EffortLevel = "max"
 )
 
 // PermissionMode controls how Claude handles tool permission requests.
@@ -35,6 +37,12 @@ const (
 	PermissionModeDefault           PermissionMode = "default"
 	PermissionModeAcceptEdits       PermissionMode = "acceptEdits"
 	PermissionModeBypassPermissions PermissionMode = "bypassPermissions"
+	// PermissionModePlan enables planning mode where the agent plans actions
+	// but does not execute tools that modify state.
+	PermissionModePlan PermissionMode = "plan"
+	// PermissionModeDontAsk silently denies any tool call that is not
+	// already pre-approved, without prompting the user.
+	PermissionModeDontAsk PermissionMode = "dontAsk"
 )
 
 // ─── Permission types ─────────────────────────────────────────────────────────
@@ -194,6 +202,34 @@ const (
 	// SettingSourceLocal loads .claude/settings.local.json (gitignored local overrides).
 	SettingSourceLocal SettingSource = "local"
 )
+
+// ─── System prompt preset ─────────────────────────────────────────────────────
+
+// SystemPromptPreset configures a preset system prompt instead of a plain string.
+// Set Type to "preset" and Preset to "claude_code" to use the built-in Claude
+// Code system prompt. Append is optional extra text appended to the preset.
+// Use WithSystemPromptPreset to set this; it takes precedence over WithSystemPrompt.
+type SystemPromptPreset struct {
+	// Type must be "preset".
+	Type string `json:"type"`
+	// Preset names the preset to use (e.g. "claude_code").
+	Preset string `json:"preset"`
+	// Append is optional extra text appended after the preset system prompt.
+	Append string `json:"append,omitempty"`
+}
+
+// ─── Tools preset ─────────────────────────────────────────────────────────────
+
+// ToolsPreset configures the base tool set via a named preset instead of an
+// explicit list. Set Type to "preset" and Preset to "claude_code" to use the
+// default Claude Code tool set.
+// Use WithToolsPreset to set this; it is passed as --tools to the subprocess.
+type ToolsPreset struct {
+	// Type must be "preset".
+	Type string `json:"type"`
+	// Preset names the preset (e.g. "claude_code").
+	Preset string `json:"preset"`
+}
 
 // ─── Agent types ──────────────────────────────────────────────────────────────
 
@@ -374,9 +410,42 @@ type Options struct {
 	// Each plugin directory must contain a .claude-plugin/plugin.json manifest.
 	Plugins []SdkPluginConfig
 
+	// Settings passes a settings file path or an inline JSON string to the
+	// subprocess via --settings. When set to a file path the CLI loads that
+	// file directly; when set to a JSON object string the CLI uses it as the
+	// settings payload. Mutually exclusive with SettingSources: if both are
+	// set, Settings takes precedence and SettingSources is ignored.
+	Settings string
+
 	// SettingSources controls which settings files are loaded by the subprocess.
 	// When empty, no filesystem settings are loaded (SDK isolation mode).
 	SettingSources []SettingSource
+
+	// AdditionalDirectories lists extra directories passed to the subprocess
+	// via --add-dir. These directories are added to the allowed directory set
+	// in addition to the CWD.
+	AdditionalDirectories []string
+
+	// ExtraArgs holds arbitrary extra CLI flags passed verbatim to the claude
+	// subprocess. Keys are flag names (e.g. "--some-flag"); values are the
+	// argument values (use empty string "" for boolean flags with no value).
+	// This provides forward-compatibility for flags not yet modelled in Options.
+	ExtraArgs map[string]string
+
+	// SystemPromptPreset configures a named preset system prompt.
+	// When set it takes precedence over SystemPrompt.
+	// Use WithSystemPromptPreset; leave nil to use SystemPrompt instead.
+	SystemPromptPreset *SystemPromptPreset
+
+	// ToolsPreset configures the base tool set via a named preset.
+	// Passed to the subprocess as --tools with a JSON payload.
+	// When nil the AllowedTools list (--allowedTools) is used as usual.
+	ToolsPreset *ToolsPreset
+
+	// Stderr is an optional callback invoked with each line written to the
+	// claude subprocess's stderr. Useful for capturing diagnostic output.
+	// When nil, stderr is silently captured and included in errors on failure.
+	Stderr func(line string)
 
 	// Env contains additional environment variables merged into the subprocess env.
 	Env map[string]string
@@ -542,6 +611,54 @@ func WithPlugins(plugins ...SdkPluginConfig) Option {
 	return func(o *Options) { o.Plugins = append(o.Plugins, plugins...) }
 }
 
+// WithSettings passes a settings file path or an inline JSON string to the
+// subprocess via --settings. Accepts either an absolute/relative path to a
+// settings.json file or a raw JSON object string (e.g.
+// `{"permissions":{"allow":["Bash"]}}`).
+// When set, SettingSources is ignored.
+func WithSettings(s string) Option {
+	return func(o *Options) { o.Settings = s }
+}
+
+// WithAdditionalDirectories adds directories to the subprocess's allowed directory
+// set via --add-dir. Each call appends to the existing list.
+func WithAdditionalDirectories(dirs ...string) Option {
+	return func(o *Options) { o.AdditionalDirectories = append(o.AdditionalDirectories, dirs...) }
+}
+
+// WithExtraArgs sets arbitrary extra CLI flags passed verbatim to the claude
+// subprocess. Keys are flag names (e.g. "--some-flag"); use an empty string
+// value for boolean flags that take no argument.
+// Multiple calls merge into the same map; later calls overwrite duplicate keys.
+func WithExtraArgs(args map[string]string) Option {
+	return func(o *Options) {
+		if o.ExtraArgs == nil {
+			o.ExtraArgs = make(map[string]string)
+		}
+		for k, v := range args {
+			o.ExtraArgs[k] = v
+		}
+	}
+}
+
+// WithSystemPromptPreset sets a named preset system prompt.
+// Takes precedence over WithSystemPrompt when both are set.
+func WithSystemPromptPreset(p *SystemPromptPreset) Option {
+	return func(o *Options) { o.SystemPromptPreset = p }
+}
+
+// WithToolsPreset sets the base tool set via a named preset, passed to the
+// subprocess as --tools with a JSON payload. When set, AllowedTools is ignored.
+func WithToolsPreset(p *ToolsPreset) Option {
+	return func(o *Options) { o.ToolsPreset = p }
+}
+
+// WithStderr sets a callback invoked for each line written to the claude
+// subprocess's stderr. Useful for capturing diagnostic/debug output.
+func WithStderr(fn func(line string)) Option {
+	return func(o *Options) { o.Stderr = fn }
+}
+
 // WithSettingSources controls which settings files are loaded by the subprocess.
 // Pass one or more of SettingSourceUser, SettingSourceProject, SettingSourceLocal.
 // When not called, no filesystem settings are loaded (SDK isolation mode).
@@ -681,9 +798,27 @@ func (o *Options) buildArgs() []string {
 		}
 	}
 
-	// SettingSources: comma-separated list passed to --setting-sources.
-	// When empty the subprocess loads no filesystem settings (SDK isolation mode).
-	if len(o.SettingSources) > 0 {
+	// AdditionalDirectories: each directory gets its own --add-dir flag.
+	for _, dir := range o.AdditionalDirectories {
+		if dir != "" {
+			args = append(args, "--add-dir", dir)
+		}
+	}
+
+	// ToolsPreset: passed as --tools with a JSON payload.
+	if o.ToolsPreset != nil {
+		if b, err := json.Marshal(o.ToolsPreset); err == nil {
+			args = append(args, "--tools", string(b))
+		}
+	}
+
+	// Settings: file path or inline JSON passed to --settings.
+	// When set, --setting-sources is skipped (Settings takes precedence).
+	if o.Settings != "" {
+		args = append(args, "--settings", o.Settings)
+	} else if len(o.SettingSources) > 0 {
+		// SettingSources: comma-separated list passed to --setting-sources.
+		// When empty the subprocess loads no filesystem settings (SDK isolation mode).
 		srcs := make([]string, len(o.SettingSources))
 		for i, s := range o.SettingSources {
 			srcs[i] = string(s)
@@ -697,6 +832,20 @@ func (o *Options) buildArgs() []string {
 		mcpCfg := map[string]any{"mcpServers": o.McpServers}
 		if b, err := json.Marshal(mcpCfg); err == nil {
 			args = append(args, "--mcp-config", string(b))
+		}
+	}
+
+	// ExtraArgs: arbitrary extra flags for forward-compatibility.
+	// Boolean flags (empty value) are appended as a single element; flags with
+	// a value are appended as two elements (flag, value).
+	for flag, val := range o.ExtraArgs {
+		if flag == "" {
+			continue
+		}
+		if val == "" {
+			args = append(args, flag)
+		} else {
+			args = append(args, flag, val)
 		}
 	}
 

@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -51,9 +52,14 @@ func spawnAndStream(ctx context.Context, opts *Options, prompt string) (*Stream,
 		return nil, fmt.Errorf("claude: stdout pipe: %w", err)
 	}
 
-	// Capture stderr so we can include it in error messages on non-zero exit.
+	// Capture stderr. When opts.Stderr is set, each line is forwarded to the
+	// callback in addition to being buffered for error reporting.
 	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
+	if opts.Stderr != nil {
+		cmd.Stderr = io.MultiWriter(&stderrBuf, &stderrLineWriter{fn: opts.Stderr})
+	} else {
+		cmd.Stderr = &stderrBuf
+	}
 
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("claude: start %q: %w", opts.ClaudeExecutable, err)
@@ -403,9 +409,15 @@ func initializeMsg(opts *Options, hooksConfig map[string]any) any {
 		agents = m
 	}
 
+	// systemPrompt: use preset object when set, otherwise plain string.
+	var systemPromptVal any = opts.SystemPrompt
+	if opts.SystemPromptPreset != nil {
+		systemPromptVal = opts.SystemPromptPreset
+	}
+
 	req := map[string]any{
 		"subtype":            "initialize",
-		"systemPrompt":       opts.SystemPrompt,
+		"systemPrompt":       systemPromptVal,
 		"appendSystemPrompt": opts.AppendSystemPrompt,
 		"sdkMcpServers":      servers,
 		"hooks":              hooksConfig,
@@ -444,6 +456,29 @@ func userMsg(prompt string) any {
 	}
 }
 
+// ─── Stderr line writer ───────────────────────────────────────────────────────
+
+// stderrLineWriter is an io.Writer that buffers writes and invokes fn for each
+// complete newline-terminated line. Incomplete trailing data is flushed on the
+// next write or discarded; the zero value is safe to use.
+type stderrLineWriter struct {
+	fn  func(string)
+	buf bytes.Buffer
+}
+
+func (w *stderrLineWriter) Write(p []byte) (int, error) {
+	w.buf.Write(p)
+	for {
+		idx := bytes.IndexByte(w.buf.Bytes(), '\n')
+		if idx < 0 {
+			break
+		}
+		line := string(w.buf.Next(idx + 1))
+		w.fn(strings.TrimRight(line, "\r\n"))
+	}
+	return len(p), nil
+}
+
 // ─── Environment ─────────────────────────────────────────────────────────────
 
 // buildEnv returns the environment for the claude subprocess.
@@ -461,6 +496,7 @@ func buildEnv(opts *Options) []string {
 		switch {
 		case strings.HasPrefix(e, "CLAUDECODE="),
 			strings.HasPrefix(e, "CLAUDE_CODE_ENTRYPOINT="),
+			strings.HasPrefix(e, "CLAUDE_AGENT_SDK_VERSION="),
 			strings.HasPrefix(e, "MAX_THINKING_TOKENS="):
 			continue
 		}
@@ -473,6 +509,7 @@ func buildEnv(opts *Options) []string {
 		out = append(out, e)
 	}
 	out = append(out, "CLAUDE_CODE_ENTRYPOINT=sdk-go")
+	out = append(out, "CLAUDE_AGENT_SDK_VERSION="+SDKVersion)
 	if opts.Thinking == ThinkingDisabled {
 		out = append(out, "MAX_THINKING_TOKENS=0")
 	} else if opts.MaxThinkingTokens > 0 {
