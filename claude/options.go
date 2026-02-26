@@ -387,6 +387,11 @@ type Options struct {
 
 	// ClaudeExecutable is the path to the claude binary. Defaults to "claude".
 	ClaudeExecutable string
+
+	// sessionMode is set internally by NewSession; not exposed as a public Option.
+	// When true, the subprocess stays alive across multiple turns (stdin is not
+	// closed after TypeResult) and the caller drives the conversation via Send().
+	sessionMode bool
 }
 
 // Option is a functional option for configuring a Query call.
@@ -487,6 +492,17 @@ func WithBypassPermissions() Option {
 	return func(o *Options) {
 		o.PermissionMode = PermissionModeBypassPermissions
 		o.AllowDangerouslySkipPermissions = true
+	}
+}
+
+// WithDefaultPermissions restores normal (non-bypass) permission mode, overriding
+// the SDK defaults of bypassPermissions + AllowDangerouslySkipPermissions.
+// Use this together with WithPermissionHandler so the subprocess sends
+// can_use_tool control_requests that the handler can intercept.
+func WithDefaultPermissions() Option {
+	return func(o *Options) {
+		o.PermissionMode = PermissionModeDefault
+		o.AllowDangerouslySkipPermissions = false
 	}
 }
 

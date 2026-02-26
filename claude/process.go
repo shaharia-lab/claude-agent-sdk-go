@@ -84,10 +84,13 @@ func spawnAndStream(ctx context.Context, opts *Options, prompt string) (*Stream,
 		return nil, fmt.Errorf("claude: initialize: %w", err)
 	}
 
-	// Send the user message (the prompt).
-	if err := write(userMsg(prompt)); err != nil {
-		_ = cmd.Process.Kill()
-		return nil, fmt.Errorf("claude: user message: %w", err)
+	// Send the user message (the prompt), unless we're in session mode
+	// (the caller will send the first message via Session.Send).
+	if !opts.sessionMode && prompt != "" {
+		if err := write(userMsg(prompt)); err != nil {
+			_ = cmd.Process.Kill()
+			return nil, fmt.Errorf("claude: user message: %w", err)
+		}
 	}
 
 	// Create the Stream struct. The goroutines below close over it.
@@ -187,9 +190,15 @@ func spawnAndStream(ctx context.Context, opts *Options, prompt string) (*Stream,
 			}
 
 			if event.Type == TypeResult {
-				gotResult = true
-				closeStdin()
-				break
+				if opts.sessionMode {
+					// Emit TypeResult to signal "turn done" but keep stdin open
+					// and the scanner running so the subprocess stays alive for the next Send().
+					// Do NOT closeStdin() — the session lives on.
+				} else {
+					gotResult = true
+					closeStdin()
+					break
+				}
 			}
 		}
 
@@ -199,12 +208,22 @@ func spawnAndStream(ctx context.Context, opts *Options, prompt string) (*Stream,
 
 		// Surface stderr on unexpected exit (bad flag, auth error, crash, etc.).
 		if err := cmd.Wait(); err != nil && !gotResult {
-			stderr := strings.TrimSpace(stderrBuf.String())
-			msg := err.Error()
-			if stderr != "" {
-				msg = stderr
+			// In session mode suppress the error when Close()/Interrupt() was called
+			// (expected shutdown) or the context was cancelled.
+			interrupted := false
+			select {
+			case <-interruptCh:
+				interrupted = true
+			default:
 			}
-			sendEvent(ctx, stream.events, errorEvent(msg))
+			if !interrupted && ctx.Err() == nil {
+				stderr := strings.TrimSpace(stderrBuf.String())
+				msg := err.Error()
+				if stderr != "" {
+					msg = stderr
+				}
+				sendEvent(ctx, stream.events, errorEvent(msg))
+			}
 		}
 	}()
 
@@ -529,6 +548,16 @@ func sendEvent(ctx context.Context, ch chan<- Event, e Event) {
 	case ch <- e:
 	case <-ctx.Done():
 	}
+}
+
+// spawnSession starts a persistent Claude subprocess in session mode.
+// Unlike spawnAndStream, it does NOT send an initial user message — the caller
+// sends each turn via Stream.SendUserMessage (or Session.Send).
+// The subprocess stays alive across multiple TypeResult events; it exits only
+// when the Stream (or Session) is closed.
+func spawnSession(ctx context.Context, opts *Options) (*Stream, error) {
+	opts.sessionMode = true
+	return spawnAndStream(ctx, opts, "")
 }
 
 // newUUID generates a random UUID v4.
