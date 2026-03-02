@@ -1,6 +1,9 @@
 package claude
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // Session maintains a persistent Claude subprocess for multi-turn conversations.
 // Unlike Run/Query (which spawn a new subprocess per call), Session keeps the
@@ -69,6 +72,51 @@ func (s *Session) SetPermissionMode(mode PermissionMode) error {
 
 // SetMaxThinkingTokens asks the claude CLI to update the max thinking token budget.
 func (s *Session) SetMaxThinkingTokens(n int) error { return s.stream.SetMaxThinkingTokens(n) }
+
+// RewindFiles asks the CLI to rewind files to the state at the given user message ID.
+func (s *Session) RewindFiles(userMessageID string) error {
+	return s.stream.RewindFiles(userMessageID)
+}
+
+// SupportedModels queries the CLI for the list of supported models.
+func (s *Session) SupportedModels() (json.RawMessage, error) {
+	return s.stream.SupportedModels()
+}
+
+// SupportedCommands queries the CLI for the list of supported commands.
+func (s *Session) SupportedCommands() (json.RawMessage, error) {
+	return s.stream.SupportedCommands()
+}
+
+// SupportedAgents queries the CLI for the list of supported agents.
+func (s *Session) SupportedAgents() (json.RawMessage, error) {
+	return s.stream.SupportedAgents()
+}
+
+// AccountInfo queries the CLI for the current account information.
+func (s *Session) AccountInfo() (json.RawMessage, error) {
+	return s.stream.AccountInfo()
+}
+
+// StopTask asks the CLI to stop a running background task.
+func (s *Session) StopTask(taskID string) error {
+	return s.stream.StopTask(taskID)
+}
+
+// ReconnectMcpServer asks the CLI to reconnect a named MCP server.
+func (s *Session) ReconnectMcpServer(serverName string) error {
+	return s.stream.ReconnectMcpServer(serverName)
+}
+
+// ToggleMcpServer asks the CLI to enable or disable a named MCP server.
+func (s *Session) ToggleMcpServer(serverName string, enabled bool) error {
+	return s.stream.ToggleMcpServer(serverName, enabled)
+}
+
+// SetMcpServers asks the CLI to replace the current MCP server configuration.
+func (s *Session) SetMcpServers(servers map[string]any) error {
+	return s.stream.SetMcpServers(servers)
+}
 
 // Interrupt initiates graceful shutdown. Equivalent to Close.
 func (s *Session) Interrupt() error { return s.stream.Interrupt() }

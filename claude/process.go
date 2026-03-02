@@ -20,6 +20,7 @@ import (
 type controlResponse struct {
 	Success bool
 	Error   string
+	Body    json.RawMessage
 }
 
 // spawnAndStream starts the claude subprocess in bidirectional JSON-lines mode
@@ -41,6 +42,9 @@ func spawnAndStream(ctx context.Context, opts *Options, prompt string) (*Stream,
 
 	cmd := exec.Command(opts.ClaudeExecutable, args...)
 	cmd.Env = buildEnv(opts)
+	if opts.CWD != "" {
+		cmd.Dir = opts.CWD
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -247,13 +251,13 @@ func handleControlRequest(line []byte, write func(any) error, opts *Options, hoo
 			Subtype string `json:"subtype"`
 
 			// can_use_tool fields
-			ToolName       string            `json:"tool_name"`
-			ToolUseID      string            `json:"tool_use_id"`
-			Input          json.RawMessage   `json:"input"`
+			ToolName       string             `json:"tool_name"`
+			ToolUseID      string             `json:"tool_use_id"`
+			Input          json.RawMessage    `json:"input"`
 			Suggestions    []PermissionUpdate `json:"permission_suggestions,omitempty"`
-			BlockedPath    string            `json:"blocked_path,omitempty"`
-			DecisionReason string            `json:"decision_reason,omitempty"`
-			AgentID        string            `json:"agent_id,omitempty"`
+			BlockedPath    string             `json:"blocked_path,omitempty"`
+			DecisionReason string             `json:"decision_reason,omitempty"`
+			AgentID        string             `json:"agent_id,omitempty"`
 
 			// hook_callback fields
 			CallbackID string    `json:"callback_id,omitempty"`
@@ -337,6 +341,23 @@ func handleControlRequest(line []byte, write func(any) error, opts *Options, hoo
 			"response": resp,
 		})
 
+	case "elicitation":
+		resp := map[string]any{"cancel": true}
+		if opts.ElicitationHandler != nil {
+			resp = opts.ElicitationHandler(envelope.Request.Input)
+			if resp == nil {
+				resp = map[string]any{"cancel": true}
+			}
+		}
+		_ = write(map[string]any{
+			"type": "control_response",
+			"response": map[string]any{
+				"subtype":    "success",
+				"request_id": envelope.RequestID,
+				"response":   resp,
+			},
+		})
+
 	default:
 		// set_model, set_permission_mode, set_max_thinking_tokens, mcp_message:
 		// These are read-only notifications from the CLI. Acknowledge silently.
@@ -354,21 +375,29 @@ func handleControlRequest(line []byte, write func(any) error, opts *Options, hoo
 // one of our set_model / set_permission_mode / etc. requests) to the waiting caller.
 func routeControlResponse(line []byte, s *Stream) {
 	var envelope struct {
-		Type      string `json:"type"`
-		RequestID string `json:"request_id"`
-		Response  struct {
-			Subtype string `json:"subtype"`
-			Error   string `json:"error,omitempty"`
-		} `json:"response"`
+		Type      string          `json:"type"`
+		RequestID string          `json:"request_id"`
+		Response  json.RawMessage `json:"response"`
 	}
 	if err := json.Unmarshal(line, &envelope); err != nil {
 		return
 	}
 
-	// Also check the inner response.request_id pattern used in some CLI versions.
 	reqID := envelope.RequestID
 	if reqID == "" {
 		return
+	}
+
+	// Extract subtype and error from the response body.
+	var respMeta struct {
+		Subtype string `json:"subtype"`
+		Error   string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(envelope.Response, &respMeta); err != nil {
+		// Treat unparseable response as an error so callers don't
+		// mistakenly see it as success.
+		respMeta.Subtype = "error"
+		respMeta.Error = fmt.Sprintf("malformed control_response: %v", err)
 	}
 
 	s.pendingMu.Lock()
@@ -381,8 +410,9 @@ func routeControlResponse(line []byte, s *Stream) {
 	if ok {
 		select {
 		case ch <- controlResponse{
-			Success: envelope.Response.Subtype != "error",
-			Error:   envelope.Response.Error,
+			Success: respMeta.Subtype != "error",
+			Error:   respMeta.Error,
+			Body:    envelope.Response,
 		}:
 		default:
 		}
@@ -422,7 +452,7 @@ func initializeMsg(opts *Options, hooksConfig map[string]any) any {
 		"sdkMcpServers":      servers,
 		"hooks":              hooksConfig,
 		"agents":             agents,
-		"promptSuggestions":  false,
+		"promptSuggestions":  opts.PromptSuggestions,
 	}
 
 	if opts.OutputFormat != nil {
@@ -497,7 +527,8 @@ func buildEnv(opts *Options) []string {
 		case strings.HasPrefix(e, "CLAUDECODE="),
 			strings.HasPrefix(e, "CLAUDE_CODE_ENTRYPOINT="),
 			strings.HasPrefix(e, "CLAUDE_AGENT_SDK_VERSION="),
-			strings.HasPrefix(e, "MAX_THINKING_TOKENS="):
+			strings.HasPrefix(e, "MAX_THINKING_TOKENS="),
+			opts.CWD != "" && strings.HasPrefix(e, "PWD="):
 			continue
 		}
 		// Also strip any user-supplied keys so they can override.
@@ -514,6 +545,10 @@ func buildEnv(opts *Options) []string {
 		out = append(out, "MAX_THINKING_TOKENS=0")
 	} else if opts.MaxThinkingTokens > 0 {
 		out = append(out, fmt.Sprintf("MAX_THINKING_TOKENS=%d", opts.MaxThinkingTokens))
+	}
+	// Set PWD when CWD is configured (matches Python SDK behaviour).
+	if opts.CWD != "" {
+		out = append(out, "PWD="+opts.CWD)
 	}
 	// Merge user-supplied env vars (last so they take precedence).
 	for k, v := range opts.Env {
@@ -559,7 +594,17 @@ func parseLine(line []byte) (Event, error) {
 		if err := json.Unmarshal(line, &m); err == nil {
 			event.System = &m
 		}
-	// TypeRateLimitEvent and future types: Raw only.
+	case TypeToolProgress:
+		var m ToolProgressMessage
+		if err := json.Unmarshal(line, &m); err == nil {
+			event.ToolProgress = &m
+		}
+	case TypeTaskStarted, TypeTaskProgress, TypeTaskNotification:
+		var m TaskMessage
+		if err := json.Unmarshal(line, &m); err == nil {
+			event.Task = &m
+		}
+		// TypeRateLimitEvent and future types: Raw only.
 	}
 
 	return event, nil

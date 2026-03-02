@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -77,10 +78,66 @@ func (s *Stream) SendUserMessage(msg string) error {
 	return s.write(userMsg(msg))
 }
 
-// sendControlRequest writes a control_request with the given subtype and extra
-// fields, then blocks until a matching control_response arrives or the ctx
-// is cancelled.
-func (s *Stream) sendControlRequest(subtype string, extras map[string]any) error {
+// RewindFiles asks the CLI to rewind files to the state at the given user message ID.
+func (s *Stream) RewindFiles(userMessageID string) error {
+	return s.sendControlRequest("rewind_files", map[string]any{
+		"user_message_id": userMessageID,
+	})
+}
+
+// ReconnectMcpServer asks the CLI to reconnect a named MCP server.
+func (s *Stream) ReconnectMcpServer(serverName string) error {
+	return s.sendControlRequest("reconnect_mcp_server", map[string]any{
+		"server_name": serverName,
+	})
+}
+
+// ToggleMcpServer asks the CLI to enable or disable a named MCP server.
+func (s *Stream) ToggleMcpServer(serverName string, enabled bool) error {
+	return s.sendControlRequest("toggle_mcp_server", map[string]any{
+		"server_name": serverName,
+		"enabled":     enabled,
+	})
+}
+
+// SetMcpServers asks the CLI to replace the current MCP server configuration.
+func (s *Stream) SetMcpServers(servers map[string]any) error {
+	return s.sendControlRequest("set_mcp_servers", map[string]any{
+		"mcp_servers": servers,
+	})
+}
+
+// SupportedModels queries the CLI for the list of supported models.
+// Returns the raw JSON response body.
+func (s *Stream) SupportedModels() (json.RawMessage, error) {
+	return s.sendControlRequestWithResponse("supported_models", nil)
+}
+
+// SupportedCommands queries the CLI for the list of supported commands.
+func (s *Stream) SupportedCommands() (json.RawMessage, error) {
+	return s.sendControlRequestWithResponse("supported_commands", nil)
+}
+
+// SupportedAgents queries the CLI for the list of supported agents.
+func (s *Stream) SupportedAgents() (json.RawMessage, error) {
+	return s.sendControlRequestWithResponse("supported_agents", nil)
+}
+
+// AccountInfo queries the CLI for the current account information.
+func (s *Stream) AccountInfo() (json.RawMessage, error) {
+	return s.sendControlRequestWithResponse("account_info", nil)
+}
+
+// StopTask asks the CLI to stop a running background task.
+func (s *Stream) StopTask(taskID string) error {
+	return s.sendControlRequest("stop_task", map[string]any{
+		"task_id": taskID,
+	})
+}
+
+// sendControlRequestWithResponse is like sendControlRequest but returns the raw
+// JSON response body on success.
+func (s *Stream) sendControlRequestWithResponse(subtype string, extras map[string]any) (json.RawMessage, error) {
 	reqID := newUUID()
 	respCh := make(chan controlResponse, 1)
 
@@ -102,21 +159,29 @@ func (s *Stream) sendControlRequest(subtype string, extras map[string]any) error
 		s.pendingMu.Lock()
 		delete(s.pending, reqID)
 		s.pendingMu.Unlock()
-		return fmt.Errorf("claude: %s: %w", subtype, err)
+		return nil, fmt.Errorf("claude: %s: %w", subtype, err)
 	}
 
 	select {
 	case resp := <-respCh:
 		if !resp.Success {
-			return fmt.Errorf("claude: %s: %s", subtype, resp.Error)
+			return nil, fmt.Errorf("claude: %s: %s", subtype, resp.Error)
 		}
-		return nil
+		return resp.Body, nil
 	case <-s.ctx.Done():
 		s.pendingMu.Lock()
 		delete(s.pending, reqID)
 		s.pendingMu.Unlock()
-		return s.ctx.Err()
+		return nil, s.ctx.Err()
 	}
+}
+
+// sendControlRequest writes a control_request with the given subtype and extra
+// fields, then blocks until a matching control_response arrives or the ctx
+// is cancelled.
+func (s *Stream) sendControlRequest(subtype string, extras map[string]any) error {
+	_, err := s.sendControlRequestWithResponse(subtype, extras)
+	return err
 }
 
 // Query runs the claude agent with the given prompt and returns a *Stream for

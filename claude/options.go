@@ -148,6 +148,12 @@ type PermissionResult struct {
 // When nil, all tool calls are allowed.
 type PermissionHandler func(toolName string, input json.RawMessage, ctx PermissionContext) PermissionResult
 
+// ElicitationHandler is called when claude sends an elicitation control_request
+// asking the SDK host for user input. The handler receives the raw JSON payload
+// and should return a response map (e.g. {"response": "user input"}).
+// When nil, elicitations are auto-cancelled with {"cancel": true}.
+type ElicitationHandler func(request json.RawMessage) map[string]any
+
 // ─── MCP server config types ─────────────────────────────────────────────────
 
 // McpStdioServer configures an external MCP server launched as a subprocess.
@@ -373,7 +379,7 @@ type Options struct {
 	// StrictMcpConfig enables strict MCP config validation via --strict-mcp-config.
 	StrictMcpConfig bool
 
-	// CWD sets the working directory for the claude subprocess via --cwd.
+	// CWD sets the working directory for the claude subprocess via exec.Cmd.Dir.
 	CWD string
 
 	// PermissionMode controls tool permission handling.
@@ -449,6 +455,19 @@ type Options struct {
 
 	// Env contains additional environment variables merged into the subprocess env.
 	Env map[string]string
+
+	// ResumeSessionAt specifies a message ID to resume the session from.
+	// Retained for forward-compatibility; not yet wired to a CLI flag.
+	ResumeSessionAt string
+
+	// PromptSuggestions controls whether the CLI returns prompt suggestions.
+	// Defaults to false (matching existing behaviour).
+	PromptSuggestions bool
+
+	// ElicitationHandler is called when the CLI sends an elicitation
+	// control_request asking the user for input. Return the elicitation
+	// response as a map. When nil, elicitations are auto-cancelled.
+	ElicitationHandler ElicitationHandler
 
 	// Sandbox configures command execution sandboxing.
 	// Passed to the CLI via the initialize message.
@@ -687,6 +706,22 @@ func WithClaudeExecutable(path string) Option {
 	return func(o *Options) { o.ClaudeExecutable = path }
 }
 
+// WithResumeSessionAt sets a message ID to resume the session from.
+func WithResumeSessionAt(messageID string) Option {
+	return func(o *Options) { o.ResumeSessionAt = messageID }
+}
+
+// WithPromptSuggestions enables or disables prompt suggestions from the CLI.
+func WithPromptSuggestions(enabled bool) Option {
+	return func(o *Options) { o.PromptSuggestions = enabled }
+}
+
+// WithElicitationHandler sets a callback invoked when the CLI sends an
+// elicitation request asking for user input.
+func WithElicitationHandler(h ElicitationHandler) Option {
+	return func(o *Options) { o.ElicitationHandler = h }
+}
+
 func defaultOptions() *Options {
 	return &Options{
 		Model:                           "claude-sonnet-4-6",
@@ -781,10 +816,6 @@ func (o *Options) buildArgs() []string {
 
 	if o.StrictMcpConfig {
 		args = append(args, "--strict-mcp-config")
-	}
-
-	if o.CWD != "" {
-		args = append(args, "--cwd", o.CWD)
 	}
 
 	if o.PermissionPromptToolName != "" {

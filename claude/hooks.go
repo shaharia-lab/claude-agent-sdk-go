@@ -6,13 +6,13 @@ import "encoding/json"
 type HookEvent string
 
 const (
-	HookEventPreToolUse       HookEvent = "PreToolUse"
-	HookEventPostToolUse      HookEvent = "PostToolUse"
+	HookEventPreToolUse  HookEvent = "PreToolUse"
+	HookEventPostToolUse HookEvent = "PostToolUse"
 	// HookEventPostToolUseFailure fires after a tool call fails.
 	HookEventPostToolUseFailure HookEvent = "PostToolUseFailure"
-	HookEventNotification     HookEvent = "Notification"
-	HookEventStop             HookEvent = "Stop"
-	HookEventSubagentStop     HookEvent = "SubagentStop"
+	HookEventNotification       HookEvent = "Notification"
+	HookEventStop               HookEvent = "Stop"
+	HookEventSubagentStop       HookEvent = "SubagentStop"
 	// HookEventSubagentStart fires when a sub-agent is started.
 	HookEventSubagentStart    HookEvent = "SubagentStart"
 	HookEventPreCompact       HookEvent = "PreCompact"
@@ -25,6 +25,22 @@ const (
 	HookEventSetup            HookEvent = "Setup"
 	// HookEventPermissionRequest fires when Claude requests permission to use a tool.
 	HookEventPermissionRequest HookEvent = "PermissionRequest"
+	// HookEventSessionEnd fires when a session ends.
+	HookEventSessionEnd HookEvent = "SessionEnd"
+	// HookEventTeammateIdle fires when a teammate agent becomes idle.
+	HookEventTeammateIdle HookEvent = "TeammateIdle"
+	// HookEventTaskCompleted fires when a task completes.
+	HookEventTaskCompleted HookEvent = "TaskCompleted"
+	// HookEventElicitation fires when claude requests user elicitation.
+	HookEventElicitation HookEvent = "Elicitation"
+	// HookEventElicitationResult fires after an elicitation is resolved.
+	HookEventElicitationResult HookEvent = "ElicitationResult"
+	// HookEventConfigChange fires when configuration changes mid-session.
+	HookEventConfigChange HookEvent = "ConfigChange"
+	// HookEventWorktreeCreate fires when a git worktree is created.
+	HookEventWorktreeCreate HookEvent = "WorktreeCreate"
+	// HookEventWorktreeRemove fires when a git worktree is removed.
+	HookEventWorktreeRemove HookEvent = "WorktreeRemove"
 )
 
 // HookOutput is the return value of a HookFunc. All fields are optional.
