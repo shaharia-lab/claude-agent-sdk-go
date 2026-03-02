@@ -70,5 +70,10 @@ func (s *Session) SetPermissionMode(mode PermissionMode) error {
 // SetMaxThinkingTokens asks the claude CLI to update the max thinking token budget.
 func (s *Session) SetMaxThinkingTokens(n int) error { return s.stream.SetMaxThinkingTokens(n) }
 
+// RewindFiles asks the CLI to rewind files to the state at the given user message ID.
+func (s *Session) RewindFiles(userMessageID string) error {
+	return s.stream.RewindFiles(userMessageID)
+}
+
 // Interrupt initiates graceful shutdown. Equivalent to Close.
 func (s *Session) Interrupt() error { return s.stream.Interrupt() }

@@ -77,6 +77,13 @@ func (s *Stream) SendUserMessage(msg string) error {
 	return s.write(userMsg(msg))
 }
 
+// RewindFiles asks the CLI to rewind files to the state at the given user message ID.
+func (s *Stream) RewindFiles(userMessageID string) error {
+	return s.sendControlRequest("rewind_files", map[string]any{
+		"user_message_id": userMessageID,
+	})
+}
+
 // sendControlRequest writes a control_request with the given subtype and extra
 // fields, then blocks until a matching control_response arrives or the ctx
 // is cancelled.
