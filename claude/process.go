@@ -559,6 +559,16 @@ func parseLine(line []byte) (Event, error) {
 		if err := json.Unmarshal(line, &m); err == nil {
 			event.System = &m
 		}
+	case TypeToolProgress:
+		var m ToolProgressMessage
+		if err := json.Unmarshal(line, &m); err == nil {
+			event.ToolProgress = &m
+		}
+	case TypeTaskStarted, TypeTaskProgress, TypeTaskNotification:
+		var m TaskMessage
+		if err := json.Unmarshal(line, &m); err == nil {
+			event.Task = &m
+		}
 	// TypeRateLimitEvent and future types: Raw only.
 	}
 

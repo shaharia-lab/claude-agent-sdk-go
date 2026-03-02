@@ -21,6 +21,30 @@ const (
 	TypeSystem MessageType = "system"
 	// TypeRateLimitEvent is emitted when rate-limit information is available.
 	TypeRateLimitEvent MessageType = "rate_limit_event"
+	// TypeToolProgress carries incremental tool execution progress updates.
+	TypeToolProgress MessageType = "tool_progress"
+	// TypeToolUseSummary carries a summary of a tool use after completion.
+	TypeToolUseSummary MessageType = "tool_use_summary"
+	// TypeTaskStarted is emitted when a background task starts.
+	TypeTaskStarted MessageType = "task_started"
+	// TypeTaskProgress carries incremental task progress updates.
+	TypeTaskProgress MessageType = "task_progress"
+	// TypeTaskNotification is emitted for task-related notifications.
+	TypeTaskNotification MessageType = "task_notification"
+	// TypeHookStarted is emitted when a hook begins execution.
+	TypeHookStarted MessageType = "hook_started"
+	// TypeHookProgress carries incremental hook execution progress.
+	TypeHookProgress MessageType = "hook_progress"
+	// TypeHookResponse is emitted when a hook produces a response.
+	TypeHookResponse MessageType = "hook_response"
+	// TypeCompactBoundary marks context compaction boundaries.
+	TypeCompactBoundary MessageType = "compact_boundary"
+	// TypeFilesPersisted is emitted when files are checkpointed to disk.
+	TypeFilesPersisted MessageType = "files_persisted"
+	// TypeAuthStatus carries authentication status updates.
+	TypeAuthStatus MessageType = "auth_status"
+	// TypePromptSuggestion carries prompt suggestions from the agent.
+	TypePromptSuggestion MessageType = "prompt_suggestion"
 )
 
 // System message subtype constants.
@@ -177,6 +201,26 @@ type SystemMessage struct {
 	SlashCommands []string `json:"slash_commands,omitempty"`
 }
 
+// ─── Tool progress message ────────────────────────────────────────────────────
+
+// ToolProgressMessage carries incremental progress updates from a running tool.
+type ToolProgressMessage struct {
+	Type      MessageType `json:"type"`
+	ToolUseID string      `json:"tool_use_id"`
+	Progress  float64     `json:"progress,omitempty"`
+	Message   string      `json:"message,omitempty"`
+}
+
+// ─── Task message ─────────────────────────────────────────────────────────────
+
+// TaskMessage carries task lifecycle events (started, progress, notification).
+type TaskMessage struct {
+	Type    MessageType `json:"type"`
+	TaskID  string      `json:"task_id,omitempty"`
+	Status  string      `json:"status,omitempty"`
+	Message string      `json:"message,omitempty"`
+}
+
 // ─── Top-level Event ──────────────────────────────────────────────────────────
 
 // Event is the top-level value yielded from Query().
@@ -190,10 +234,12 @@ type SystemMessage struct {
 // For unknown types (e.g. TypeRateLimitEvent), only Raw is set so callers can
 // handle forward-compatibility themselves.
 type Event struct {
-	Type        MessageType
-	Assistant   *AssistantMessage
-	StreamEvent *StreamEventMessage
-	Result      *Result
-	System      *SystemMessage
-	Raw         json.RawMessage
+	Type         MessageType
+	Assistant    *AssistantMessage
+	StreamEvent  *StreamEventMessage
+	Result       *Result
+	System       *SystemMessage
+	ToolProgress *ToolProgressMessage
+	Task         *TaskMessage
+	Raw          json.RawMessage
 }
