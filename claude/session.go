@@ -103,5 +103,20 @@ func (s *Session) StopTask(taskID string) error {
 	return s.stream.StopTask(taskID)
 }
 
+// ReconnectMcpServer asks the CLI to reconnect a named MCP server.
+func (s *Session) ReconnectMcpServer(serverName string) error {
+	return s.stream.ReconnectMcpServer(serverName)
+}
+
+// ToggleMcpServer asks the CLI to enable or disable a named MCP server.
+func (s *Session) ToggleMcpServer(serverName string, enabled bool) error {
+	return s.stream.ToggleMcpServer(serverName, enabled)
+}
+
+// SetMcpServers asks the CLI to replace the current MCP server configuration.
+func (s *Session) SetMcpServers(servers map[string]any) error {
+	return s.stream.SetMcpServers(servers)
+}
+
 // Interrupt initiates graceful shutdown. Equivalent to Close.
 func (s *Session) Interrupt() error { return s.stream.Interrupt() }

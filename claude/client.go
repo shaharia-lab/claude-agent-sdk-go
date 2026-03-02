@@ -85,6 +85,28 @@ func (s *Stream) RewindFiles(userMessageID string) error {
 	})
 }
 
+// ReconnectMcpServer asks the CLI to reconnect a named MCP server.
+func (s *Stream) ReconnectMcpServer(serverName string) error {
+	return s.sendControlRequest("reconnect_mcp_server", map[string]any{
+		"server_name": serverName,
+	})
+}
+
+// ToggleMcpServer asks the CLI to enable or disable a named MCP server.
+func (s *Stream) ToggleMcpServer(serverName string, enabled bool) error {
+	return s.sendControlRequest("toggle_mcp_server", map[string]any{
+		"server_name": serverName,
+		"enabled":     enabled,
+	})
+}
+
+// SetMcpServers asks the CLI to replace the current MCP server configuration.
+func (s *Stream) SetMcpServers(servers map[string]any) error {
+	return s.sendControlRequest("set_mcp_servers", map[string]any{
+		"mcp_servers": servers,
+	})
+}
+
 // SupportedModels queries the CLI for the list of supported models.
 // Returns the raw JSON response body.
 func (s *Stream) SupportedModels() (json.RawMessage, error) {
