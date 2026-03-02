@@ -251,13 +251,13 @@ func handleControlRequest(line []byte, write func(any) error, opts *Options, hoo
 			Subtype string `json:"subtype"`
 
 			// can_use_tool fields
-			ToolName       string            `json:"tool_name"`
-			ToolUseID      string            `json:"tool_use_id"`
-			Input          json.RawMessage   `json:"input"`
+			ToolName       string             `json:"tool_name"`
+			ToolUseID      string             `json:"tool_use_id"`
+			Input          json.RawMessage    `json:"input"`
 			Suggestions    []PermissionUpdate `json:"permission_suggestions,omitempty"`
-			BlockedPath    string            `json:"blocked_path,omitempty"`
-			DecisionReason string            `json:"decision_reason,omitempty"`
-			AgentID        string            `json:"agent_id,omitempty"`
+			BlockedPath    string             `json:"blocked_path,omitempty"`
+			DecisionReason string             `json:"decision_reason,omitempty"`
+			AgentID        string             `json:"agent_id,omitempty"`
 
 			// hook_callback fields
 			CallbackID string    `json:"callback_id,omitempty"`
@@ -604,7 +604,7 @@ func parseLine(line []byte) (Event, error) {
 		if err := json.Unmarshal(line, &m); err == nil {
 			event.Task = &m
 		}
-	// TypeRateLimitEvent and future types: Raw only.
+		// TypeRateLimitEvent and future types: Raw only.
 	}
 
 	return event, nil

@@ -6,13 +6,13 @@ import "encoding/json"
 type HookEvent string
 
 const (
-	HookEventPreToolUse       HookEvent = "PreToolUse"
-	HookEventPostToolUse      HookEvent = "PostToolUse"
+	HookEventPreToolUse  HookEvent = "PreToolUse"
+	HookEventPostToolUse HookEvent = "PostToolUse"
 	// HookEventPostToolUseFailure fires after a tool call fails.
 	HookEventPostToolUseFailure HookEvent = "PostToolUseFailure"
-	HookEventNotification     HookEvent = "Notification"
-	HookEventStop             HookEvent = "Stop"
-	HookEventSubagentStop     HookEvent = "SubagentStop"
+	HookEventNotification       HookEvent = "Notification"
+	HookEventStop               HookEvent = "Stop"
+	HookEventSubagentStop       HookEvent = "SubagentStop"
 	// HookEventSubagentStart fires when a sub-agent is started.
 	HookEventSubagentStart    HookEvent = "SubagentStart"
 	HookEventPreCompact       HookEvent = "PreCompact"
