@@ -20,6 +20,7 @@ import (
 type controlResponse struct {
 	Success bool
 	Error   string
+	Body    json.RawMessage
 }
 
 // spawnAndStream starts the claude subprocess in bidirectional JSON-lines mode
@@ -41,6 +42,9 @@ func spawnAndStream(ctx context.Context, opts *Options, prompt string) (*Stream,
 
 	cmd := exec.Command(opts.ClaudeExecutable, args...)
 	cmd.Env = buildEnv(opts)
+	if opts.CWD != "" {
+		cmd.Dir = opts.CWD
+	}
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -354,22 +358,25 @@ func handleControlRequest(line []byte, write func(any) error, opts *Options, hoo
 // one of our set_model / set_permission_mode / etc. requests) to the waiting caller.
 func routeControlResponse(line []byte, s *Stream) {
 	var envelope struct {
-		Type      string `json:"type"`
-		RequestID string `json:"request_id"`
-		Response  struct {
-			Subtype string `json:"subtype"`
-			Error   string `json:"error,omitempty"`
-		} `json:"response"`
+		Type      string          `json:"type"`
+		RequestID string          `json:"request_id"`
+		Response  json.RawMessage `json:"response"`
 	}
 	if err := json.Unmarshal(line, &envelope); err != nil {
 		return
 	}
 
-	// Also check the inner response.request_id pattern used in some CLI versions.
 	reqID := envelope.RequestID
 	if reqID == "" {
 		return
 	}
+
+	// Extract subtype and error from the response body.
+	var respMeta struct {
+		Subtype string `json:"subtype"`
+		Error   string `json:"error,omitempty"`
+	}
+	_ = json.Unmarshal(envelope.Response, &respMeta)
 
 	s.pendingMu.Lock()
 	ch, ok := s.pending[reqID]
@@ -381,8 +388,9 @@ func routeControlResponse(line []byte, s *Stream) {
 	if ok {
 		select {
 		case ch <- controlResponse{
-			Success: envelope.Response.Subtype != "error",
-			Error:   envelope.Response.Error,
+			Success: respMeta.Subtype != "error",
+			Error:   respMeta.Error,
+			Body:    envelope.Response,
 		}:
 		default:
 		}

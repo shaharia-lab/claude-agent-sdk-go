@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -82,6 +83,75 @@ func (s *Stream) RewindFiles(userMessageID string) error {
 	return s.sendControlRequest("rewind_files", map[string]any{
 		"user_message_id": userMessageID,
 	})
+}
+
+// SupportedModels queries the CLI for the list of supported models.
+// Returns the raw JSON response body.
+func (s *Stream) SupportedModels() (json.RawMessage, error) {
+	return s.sendControlRequestWithResponse("supported_models", nil)
+}
+
+// SupportedCommands queries the CLI for the list of supported commands.
+func (s *Stream) SupportedCommands() (json.RawMessage, error) {
+	return s.sendControlRequestWithResponse("supported_commands", nil)
+}
+
+// SupportedAgents queries the CLI for the list of supported agents.
+func (s *Stream) SupportedAgents() (json.RawMessage, error) {
+	return s.sendControlRequestWithResponse("supported_agents", nil)
+}
+
+// AccountInfo queries the CLI for the current account information.
+func (s *Stream) AccountInfo() (json.RawMessage, error) {
+	return s.sendControlRequestWithResponse("account_info", nil)
+}
+
+// StopTask asks the CLI to stop a running background task.
+func (s *Stream) StopTask(taskID string) error {
+	return s.sendControlRequest("stop_task", map[string]any{
+		"task_id": taskID,
+	})
+}
+
+// sendControlRequestWithResponse is like sendControlRequest but returns the raw
+// JSON response body on success.
+func (s *Stream) sendControlRequestWithResponse(subtype string, extras map[string]any) (json.RawMessage, error) {
+	reqID := newUUID()
+	respCh := make(chan controlResponse, 1)
+
+	s.pendingMu.Lock()
+	s.pending[reqID] = respCh
+	s.pendingMu.Unlock()
+
+	req := map[string]any{"subtype": subtype}
+	for k, v := range extras {
+		req[k] = v
+	}
+
+	err := s.write(map[string]any{
+		"type":       "control_request",
+		"request_id": reqID,
+		"request":    req,
+	})
+	if err != nil {
+		s.pendingMu.Lock()
+		delete(s.pending, reqID)
+		s.pendingMu.Unlock()
+		return nil, fmt.Errorf("claude: %s: %w", subtype, err)
+	}
+
+	select {
+	case resp := <-respCh:
+		if !resp.Success {
+			return nil, fmt.Errorf("claude: %s: %s", subtype, resp.Error)
+		}
+		return resp.Body, nil
+	case <-s.ctx.Done():
+		s.pendingMu.Lock()
+		delete(s.pending, reqID)
+		s.pendingMu.Unlock()
+		return nil, s.ctx.Err()
+	}
 }
 
 // sendControlRequest writes a control_request with the given subtype and extra

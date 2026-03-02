@@ -1,6 +1,9 @@
 package claude
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // Session maintains a persistent Claude subprocess for multi-turn conversations.
 // Unlike Run/Query (which spawn a new subprocess per call), Session keeps the
@@ -73,6 +76,31 @@ func (s *Session) SetMaxThinkingTokens(n int) error { return s.stream.SetMaxThin
 // RewindFiles asks the CLI to rewind files to the state at the given user message ID.
 func (s *Session) RewindFiles(userMessageID string) error {
 	return s.stream.RewindFiles(userMessageID)
+}
+
+// SupportedModels queries the CLI for the list of supported models.
+func (s *Session) SupportedModels() (json.RawMessage, error) {
+	return s.stream.SupportedModels()
+}
+
+// SupportedCommands queries the CLI for the list of supported commands.
+func (s *Session) SupportedCommands() (json.RawMessage, error) {
+	return s.stream.SupportedCommands()
+}
+
+// SupportedAgents queries the CLI for the list of supported agents.
+func (s *Session) SupportedAgents() (json.RawMessage, error) {
+	return s.stream.SupportedAgents()
+}
+
+// AccountInfo queries the CLI for the current account information.
+func (s *Session) AccountInfo() (json.RawMessage, error) {
+	return s.stream.AccountInfo()
+}
+
+// StopTask asks the CLI to stop a running background task.
+func (s *Session) StopTask(taskID string) error {
+	return s.stream.StopTask(taskID)
 }
 
 // Interrupt initiates graceful shutdown. Equivalent to Close.
