@@ -55,6 +55,9 @@ type SessionTranscript struct {
 // GetSessionMessages runs `claude sessions get <id> --output-format json` and
 // returns the raw transcript. Options are respected for locating the CLI.
 func GetSessionMessages(ctx context.Context, sessionID string, opts ...Option) (*SessionTranscript, error) {
+	if sessionID == "" {
+		return nil, fmt.Errorf("claude: sessions get: sessionID must not be empty")
+	}
 	o := defaultOptions()
 	for _, opt := range opts {
 		opt(o)

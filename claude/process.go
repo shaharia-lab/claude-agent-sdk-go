@@ -393,7 +393,12 @@ func routeControlResponse(line []byte, s *Stream) {
 		Subtype string `json:"subtype"`
 		Error   string `json:"error,omitempty"`
 	}
-	_ = json.Unmarshal(envelope.Response, &respMeta)
+	if err := json.Unmarshal(envelope.Response, &respMeta); err != nil {
+		// Treat unparseable response as an error so callers don't
+		// mistakenly see it as success.
+		respMeta.Subtype = "error"
+		respMeta.Error = fmt.Sprintf("malformed control_response: %v", err)
+	}
 
 	s.pendingMu.Lock()
 	ch, ok := s.pending[reqID]

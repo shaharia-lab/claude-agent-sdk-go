@@ -2,6 +2,7 @@ package claude
 
 import (
 	"context"
+	"fmt"
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -63,20 +64,18 @@ func ToolServer(ctx context.Context, name string, tools ...ToolDef) (McpHTTPServ
 //
 // This is the simplest way to expose Go functions as tools to Claude:
 //
-//	stream, err := claude.Query(ctx, "Add 2+3",
-//	    claude.WithTools(ctx, "my-tools", addTool, multiplyTool),
-//	)
-func WithTools(ctx context.Context, name string, tools ...ToolDef) Option {
+//	toolsOpt, err := claude.WithTools(ctx, "my-tools", addTool, multiplyTool)
+//	if err != nil { ... }
+//	stream, err := claude.Query(ctx, "Add 2+3", toolsOpt)
+func WithTools(ctx context.Context, name string, tools ...ToolDef) (Option, error) {
+	cfg, err := ToolServer(ctx, name, tools...)
+	if err != nil {
+		return nil, fmt.Errorf("claude: WithTools %q: %w", name, err)
+	}
 	return func(o *Options) {
-		cfg, err := ToolServer(ctx, name, tools...)
-		if err != nil {
-			// If we fail to start the server, skip silently. The caller
-			// will notice because the tools won't be available.
-			return
-		}
 		if o.McpServers == nil {
 			o.McpServers = make(map[string]any)
 		}
 		o.McpServers[name] = cfg
-	}
+	}, nil
 }

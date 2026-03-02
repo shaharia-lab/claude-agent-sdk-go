@@ -180,42 +180,8 @@ func (s *Stream) sendControlRequestWithResponse(subtype string, extras map[strin
 // fields, then blocks until a matching control_response arrives or the ctx
 // is cancelled.
 func (s *Stream) sendControlRequest(subtype string, extras map[string]any) error {
-	reqID := newUUID()
-	respCh := make(chan controlResponse, 1)
-
-	s.pendingMu.Lock()
-	s.pending[reqID] = respCh
-	s.pendingMu.Unlock()
-
-	req := map[string]any{"subtype": subtype}
-	for k, v := range extras {
-		req[k] = v
-	}
-
-	err := s.write(map[string]any{
-		"type":       "control_request",
-		"request_id": reqID,
-		"request":    req,
-	})
-	if err != nil {
-		s.pendingMu.Lock()
-		delete(s.pending, reqID)
-		s.pendingMu.Unlock()
-		return fmt.Errorf("claude: %s: %w", subtype, err)
-	}
-
-	select {
-	case resp := <-respCh:
-		if !resp.Success {
-			return fmt.Errorf("claude: %s: %s", subtype, resp.Error)
-		}
-		return nil
-	case <-s.ctx.Done():
-		s.pendingMu.Lock()
-		delete(s.pending, reqID)
-		s.pendingMu.Unlock()
-		return s.ctx.Err()
-	}
+	_, err := s.sendControlRequestWithResponse(subtype, extras)
+	return err
 }
 
 // Query runs the claude agent with the given prompt and returns a *Stream for
