@@ -341,6 +341,23 @@ func handleControlRequest(line []byte, write func(any) error, opts *Options, hoo
 			"response": resp,
 		})
 
+	case "elicitation":
+		resp := map[string]any{"cancel": true}
+		if opts.ElicitationHandler != nil {
+			resp = opts.ElicitationHandler(envelope.Request.Input)
+			if resp == nil {
+				resp = map[string]any{"cancel": true}
+			}
+		}
+		_ = write(map[string]any{
+			"type": "control_response",
+			"response": map[string]any{
+				"subtype":    "success",
+				"request_id": envelope.RequestID,
+				"response":   resp,
+			},
+		})
+
 	default:
 		// set_model, set_permission_mode, set_max_thinking_tokens, mcp_message:
 		// These are read-only notifications from the CLI. Acknowledge silently.
@@ -430,7 +447,7 @@ func initializeMsg(opts *Options, hooksConfig map[string]any) any {
 		"sdkMcpServers":      servers,
 		"hooks":              hooksConfig,
 		"agents":             agents,
-		"promptSuggestions":  false,
+		"promptSuggestions":  opts.PromptSuggestions,
 	}
 
 	if opts.OutputFormat != nil {
