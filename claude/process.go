@@ -522,7 +522,8 @@ func buildEnv(opts *Options) []string {
 		case strings.HasPrefix(e, "CLAUDECODE="),
 			strings.HasPrefix(e, "CLAUDE_CODE_ENTRYPOINT="),
 			strings.HasPrefix(e, "CLAUDE_AGENT_SDK_VERSION="),
-			strings.HasPrefix(e, "MAX_THINKING_TOKENS="):
+			strings.HasPrefix(e, "MAX_THINKING_TOKENS="),
+			opts.CWD != "" && strings.HasPrefix(e, "PWD="):
 			continue
 		}
 		// Also strip any user-supplied keys so they can override.
@@ -539,6 +540,10 @@ func buildEnv(opts *Options) []string {
 		out = append(out, "MAX_THINKING_TOKENS=0")
 	} else if opts.MaxThinkingTokens > 0 {
 		out = append(out, fmt.Sprintf("MAX_THINKING_TOKENS=%d", opts.MaxThinkingTokens))
+	}
+	// Set PWD when CWD is configured (matches Python SDK behaviour).
+	if opts.CWD != "" {
+		out = append(out, "PWD="+opts.CWD)
 	}
 	// Merge user-supplied env vars (last so they take precedence).
 	for k, v := range opts.Env {
