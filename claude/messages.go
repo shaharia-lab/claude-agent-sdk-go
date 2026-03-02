@@ -138,6 +138,18 @@ type Usage struct {
 	OutputTokens             int `json:"output_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+	WebSearchRequests        int `json:"web_search_requests,omitempty"`
+}
+
+// ModelUsage holds per-model token and cost breakdown.
+type ModelUsage struct {
+	InputTokens              int     `json:"input_tokens"`
+	OutputTokens             int     `json:"output_tokens"`
+	CacheReadInputTokens     int     `json:"cache_read_input_tokens"`
+	CacheCreationInputTokens int     `json:"cache_creation_input_tokens"`
+	CostUSD                  float64 `json:"cost_usd"`
+	ContextWindow            int     `json:"context_window,omitempty"`
+	MaxOutputTokens          int     `json:"max_output_tokens,omitempty"`
 }
 
 // ─── Result message ────────────────────────────────────────────────────────────
@@ -158,6 +170,8 @@ type Result struct {
 	Usage         Usage       `json:"usage"`
 	SessionID     string      `json:"session_id"`
 	UUID          string      `json:"uuid"`
+	// ModelUsages holds per-model token and cost breakdowns keyed by model ID.
+	ModelUsages map[string]ModelUsage `json:"model_usages,omitempty"`
 	// Populated when IsError is true.
 	Errors []string `json:"errors,omitempty"`
 	// StructuredOutput holds parsed structured output when an OutputFormat
