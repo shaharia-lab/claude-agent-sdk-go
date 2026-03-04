@@ -32,7 +32,7 @@ func main() {
 	// ── Turn 2: resume the session, Claude should remember the context ─────────
 	fmt.Println("=== Turn 2 (resumed session) ===")
 	r2, err := claude.Run(ctx, "What is my name and what am I building?",
-		append(opts, claude.WithSessionID(r1.SessionID))...,
+		append(opts, claude.WithSessionIDToResume(r1.SessionID))...,
 	)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "turn 2 error: %v\n", err)

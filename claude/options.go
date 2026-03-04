@@ -333,8 +333,11 @@ type Options struct {
 	// Sent via the initialize message on stdin.
 	AppendSystemPrompt string
 
-	// SessionID resumes an existing session (--resume <id>).
-	SessionID string
+	// ResumeSessionID resumes an existing session by its ID (--resume <id>).
+	ResumeSessionID string
+
+	// CustomSessionID sets a custom UUID for a brand-new session (--session-id <uuid>).
+	CustomSessionID string
 
 	// Continue resumes the most recent session (--continue).
 	Continue bool
@@ -497,8 +500,14 @@ func WithAppendSystemPrompt(prompt string) Option {
 	return func(o *Options) { o.AppendSystemPrompt = prompt }
 }
 
+// WithSessionIDToResume resumes an existing session by its ID (--resume <id>).
+func WithSessionIDToResume(id string) Option {
+	return func(o *Options) { o.ResumeSessionID = id }
+}
+
+// WithSessionID sets a custom UUID for a brand-new session (--session-id <uuid>).
 func WithSessionID(id string) Option {
-	return func(o *Options) { o.SessionID = id }
+	return func(o *Options) { o.CustomSessionID = id }
 }
 
 // WithContinue resumes the most recent conversation session.
@@ -765,8 +774,12 @@ func (o *Options) buildArgs() []string {
 		args = append(args, "--effort", string(o.Effort))
 	}
 
-	if o.SessionID != "" {
-		args = append(args, "--resume", o.SessionID)
+	if o.ResumeSessionID != "" {
+		args = append(args, "--resume", o.ResumeSessionID)
+	}
+
+	if o.CustomSessionID != "" {
+		args = append(args, "--session-id", o.CustomSessionID)
 	}
 
 	if o.Continue {

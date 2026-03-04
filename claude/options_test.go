@@ -2,15 +2,28 @@ package claude
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
+
+func containsFlag(args []string, flag, value string) bool {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == flag && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
+func containsBoolFlag(args []string, flag string) bool {
+	return slices.Contains(args, flag)
+}
 
 func TestBuildArgs_Defaults(t *testing.T) {
 	opts := defaultOptions()
 	args := opts.buildArgs()
 
-	// Must include bidirectional mode flags.
 	joined := strings.Join(args, " ")
 	for _, required := range []string{
 		"--output-format stream-json",
@@ -69,9 +82,10 @@ func TestBuildArgs_Effort(t *testing.T) {
 	}
 }
 
-func TestBuildArgs_SessionID(t *testing.T) {
+// TestBuildArgs_ResumeSessionID verifies that ResumeSessionID produces --resume <id>.
+func TestBuildArgs_ResumeSessionID(t *testing.T) {
 	opts := defaultOptions()
-	opts.SessionID = "abc123"
+	opts.ResumeSessionID = "abc123"
 	args := opts.buildArgs()
 	found := false
 	for i, a := range args {
@@ -81,6 +95,105 @@ func TestBuildArgs_SessionID(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected --resume abc123 in args")
+	}
+}
+
+// TestBuildArgs_ResumeSessionID_EmptyIsOmitted ensures --resume is absent when empty.
+func TestBuildArgs_ResumeSessionID_EmptyIsOmitted(t *testing.T) {
+	opts := defaultOptions()
+	args := opts.buildArgs()
+	if containsBoolFlag(args, "--resume") {
+		t.Errorf("expected --resume to be absent when ResumeSessionID is empty; got %v", args)
+	}
+}
+
+// TestBuildArgs_CustomSessionID verifies that CustomSessionID produces --session-id <uuid>.
+func TestBuildArgs_CustomSessionID(t *testing.T) {
+	opts := defaultOptions()
+	opts.CustomSessionID = "my-custom-uuid-1234"
+	args := opts.buildArgs()
+	if !containsFlag(args, "--session-id", "my-custom-uuid-1234") {
+		t.Errorf("expected --session-id my-custom-uuid-1234 in args; got %v", args)
+	}
+}
+
+// TestBuildArgs_CustomSessionID_EmptyIsOmitted ensures --session-id is absent when empty.
+func TestBuildArgs_CustomSessionID_EmptyIsOmitted(t *testing.T) {
+	opts := defaultOptions()
+	args := opts.buildArgs()
+	if containsBoolFlag(args, "--session-id") {
+		t.Errorf("expected --session-id to be absent when CustomSessionID is empty; got %v", args)
+	}
+}
+
+// TestBuildArgs_BothSessionFlags verifies both fields can be set simultaneously.
+func TestBuildArgs_BothSessionFlags(t *testing.T) {
+	opts := defaultOptions()
+	WithSessionIDToResume("resume-id")(opts)
+	WithSessionID("custom-id")(opts)
+	args := opts.buildArgs()
+
+	if !containsFlag(args, "--resume", "resume-id") {
+		t.Errorf("expected --resume resume-id in args; got %v", args)
+	}
+	if !containsFlag(args, "--session-id", "custom-id") {
+		t.Errorf("expected --session-id custom-id in args; got %v", args)
+	}
+}
+
+// TestWithSessionID_ProducesSessionIDFlag_NotResume confirms WithSessionID does not
+// produce --resume; it must only produce --session-id.
+func TestWithSessionID_ProducesSessionIDFlag_NotResume(t *testing.T) {
+	opts := defaultOptions()
+	WithSessionID("uuid-xyz")(opts)
+	args := opts.buildArgs()
+
+	if containsBoolFlag(args, "--resume") {
+		t.Errorf("WithSessionID must not produce --resume; got %v", args)
+	}
+	if !containsFlag(args, "--session-id", "uuid-xyz") {
+		t.Errorf("WithSessionID must produce --session-id; got %v", args)
+	}
+}
+
+// TestWithSessionIDToResume_ProducesResumeFlag_NotSessionID confirms WithSessionIDToResume
+// does not produce --session-id; it must only produce --resume.
+func TestWithSessionIDToResume_ProducesResumeFlag_NotSessionID(t *testing.T) {
+	opts := defaultOptions()
+	WithSessionIDToResume("resume-xyz")(opts)
+	args := opts.buildArgs()
+
+	if containsBoolFlag(args, "--session-id") {
+		t.Errorf("WithSessionIDToResume must not produce --session-id; got %v", args)
+	}
+	if !containsFlag(args, "--resume", "resume-xyz") {
+		t.Errorf("WithSessionIDToResume must produce --resume; got %v", args)
+	}
+}
+
+// TestWithSessionIDToResume_SetsResumeSessionIDField verifies the correct struct field is set.
+func TestWithSessionIDToResume_SetsResumeSessionIDField(t *testing.T) {
+	opts := defaultOptions()
+	WithSessionIDToResume("field-test-id")(opts)
+
+	if opts.ResumeSessionID != "field-test-id" {
+		t.Errorf("expected ResumeSessionID=%q; got %q", "field-test-id", opts.ResumeSessionID)
+	}
+	if opts.CustomSessionID != "" {
+		t.Errorf("expected CustomSessionID to be empty; got %q", opts.CustomSessionID)
+	}
+}
+
+// TestWithSessionID_SetsCustomSessionIDField verifies the correct struct field is set.
+func TestWithSessionID_SetsCustomSessionIDField(t *testing.T) {
+	opts := defaultOptions()
+	WithSessionID("custom-field-id")(opts)
+
+	if opts.CustomSessionID != "custom-field-id" {
+		t.Errorf("expected CustomSessionID=%q; got %q", "custom-field-id", opts.CustomSessionID)
+	}
+	if opts.ResumeSessionID != "" {
+		t.Errorf("expected ResumeSessionID to be empty; got %q", opts.ResumeSessionID)
 	}
 }
 
