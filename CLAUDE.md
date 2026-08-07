@@ -44,7 +44,7 @@ The SDK does not call the Claude API directly — it spawns the `claude` CLI as 
 
 ## Gap analysis
 
-`GAP_ANALYSIS.md` compares this SDK's feature surface against the official SDKs. To regenerate it (do all of this every time):
+`GAP_ANALYSIS.md` compares this SDK's feature surface against the official SDKs. Use the `/gap-analysis` skill (`.claude/skills/gap-analysis/`) for the full workflow — verified research, report generation, and Epic/sub-issue creation. The essentials (do all of this every time):
 
 1. Ensure the official SDKs are checked out as sibling directories of this repo (`../claude-agent-sdk-typescript`, `../claude-agent-sdk-python`); clone them from `https://github.com/anthropics/claude-agent-sdk-typescript` and `https://github.com/anthropics/claude-agent-sdk-python` if missing.
 2. In each, fetch and pull the latest default branch, and identify the latest release tag (`git tag --sort=-v:refname | head -1` or `gh release view`). Analyze against both the branch tip and the latest release, noting features that are on the tip but not yet released.
