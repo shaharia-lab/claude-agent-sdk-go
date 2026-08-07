@@ -4,7 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Unofficial, community-maintained Go SDK for the Claude Agent (module `github.com/shaharia-lab/claude-agent-sdk-go`). It mirrors the design and feature set of Anthropic's official TypeScript and Python Agent SDKs — parity with those SDKs is a design goal (`GAP_ANALYSIS.md` tracks gaps). All library code lives in the single `claude/` package; `examples/` contains runnable programs per feature.
+Unofficial, community-maintained Go SDK for the Claude Agent (module `github.com/shaharia-lab/claude-agent-sdk-go`). It mirrors the design and feature set of Anthropic's official Agent SDKs, which are the **source of truth** for this project:
+
+- TypeScript: https://github.com/anthropics/claude-agent-sdk-typescript
+- Python: https://github.com/anthropics/claude-agent-sdk-python
+
+The development cycle is: periodically run a gap analysis against the official SDKs (see "Gap analysis" below, results in `GAP_ANALYSIS.md`), implement the missing features, then cut a new Go SDK release. When designing any API, check how the official SDKs (TypeScript first) name and shape it, and follow that.
+
+All library code lives in the single `claude/` package; `examples/` contains runnable programs per feature.
 
 ## Commands
 
