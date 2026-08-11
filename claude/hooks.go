@@ -17,12 +17,9 @@ const (
 	HookEventSubagentStart    HookEvent = "SubagentStart"
 	HookEventPreCompact       HookEvent = "PreCompact"
 	HookEventUserPromptSubmit HookEvent = "UserPromptSubmit"
-	HookEventStart            HookEvent = "Start"
-	HookEventPreBash          HookEvent = "PreBash"
-	HookEventPostBash         HookEvent = "PostBash"
-	HookEventPreEdit          HookEvent = "PreEdit"
-	HookEventPostEdit         HookEvent = "PostEdit"
-	HookEventSetup            HookEvent = "Setup"
+	// HookEventSessionStart fires when a session starts.
+	HookEventSessionStart HookEvent = "SessionStart"
+	HookEventSetup        HookEvent = "Setup"
 	// HookEventPermissionRequest fires when Claude requests permission to use a tool.
 	HookEventPermissionRequest HookEvent = "PermissionRequest"
 	// HookEventSessionEnd fires when a session ends.
@@ -72,7 +69,8 @@ type HookMatcher struct {
 	Matcher string
 	// Hooks are the callback functions to invoke when the matcher fires.
 	Hooks []HookFunc
-	// Timeout is the timeout in milliseconds for each hook invocation (0 = default).
+	// Timeout is the timeout in seconds for all hooks in this matcher
+	// (0 = the CLI default, which is 60s).
 	Timeout int
 }
 
@@ -94,20 +92,30 @@ func buildHooksForInitialize(hooks map[HookEvent][]HookMatcher) (map[string]any,
 	for event, matchers := range hooks {
 		var matcherConfigs []map[string]any
 		for _, matcher := range matchers {
+			if len(matcher.Hooks) == 0 {
+				continue
+			}
+			callbackIDs := make([]string, 0, len(matcher.Hooks))
 			for _, fn := range matcher.Hooks {
 				cbID := newUUID()
 				reg[cbID] = fn
-				cfg := map[string]any{
-					"callback_id": cbID,
-				}
-				if matcher.Matcher != "" {
-					cfg["matcher"] = matcher.Matcher
-				}
-				if matcher.Timeout > 0 {
-					cfg["timeout"] = matcher.Timeout
-				}
-				matcherConfigs = append(matcherConfigs, cfg)
+				callbackIDs = append(callbackIDs, cbID)
 			}
+			// The CLI expects one entry per matcher, carrying all of that
+			// matcher's callback IDs. "matcher" is always present (null when
+			// unset), mirroring the official Python SDK.
+			var matcherValue any
+			if matcher.Matcher != "" {
+				matcherValue = matcher.Matcher
+			}
+			cfg := map[string]any{
+				"matcher":         matcherValue,
+				"hookCallbackIds": callbackIDs,
+			}
+			if matcher.Timeout > 0 {
+				cfg["timeout"] = matcher.Timeout
+			}
+			matcherConfigs = append(matcherConfigs, cfg)
 		}
 		if len(matcherConfigs) > 0 {
 			hooksConfig[string(event)] = matcherConfigs

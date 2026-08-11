@@ -260,8 +260,7 @@ func handleControlRequest(line []byte, write func(any) error, opts *Options, hoo
 			AgentID        string             `json:"agent_id,omitempty"`
 
 			// hook_callback fields
-			CallbackID string    `json:"callback_id,omitempty"`
-			HookEvent  HookEvent `json:"hook_event,omitempty"`
+			CallbackID string `json:"callback_id,omitempty"`
 
 			// set_model / set_permission_mode / set_max_thinking_tokens
 			Model             string `json:"model,omitempty"`
@@ -313,21 +312,37 @@ func handleControlRequest(line []byte, write func(any) error, opts *Options, hoo
 		})
 
 	case "hook_callback":
-		var output *HookOutput
-		if fn, ok := hookReg[envelope.Request.CallbackID]; ok {
-			var err error
-			output, err = fn(envelope.Request.HookEvent, envelope.Request.Input, envelope.Request.ToolUseID)
-			if err != nil {
-				_ = write(map[string]any{
-					"type": "control_response",
-					"response": map[string]any{
-						"subtype":    "error",
-						"request_id": envelope.RequestID,
-						"error":      err.Error(),
-					},
-				})
-				return
-			}
+		fn, ok := hookReg[envelope.Request.CallbackID]
+		if !ok {
+			_ = write(map[string]any{
+				"type": "control_response",
+				"response": map[string]any{
+					"subtype":    "error",
+					"request_id": envelope.RequestID,
+					"error":      "no hook callback found for ID: " + envelope.Request.CallbackID,
+				},
+			})
+			return
+		}
+		// The event name travels inside the hook input payload, not on the
+		// control_request envelope. An absent or unparseable name yields ""
+		// rather than dropping the callback — a missing reply hangs the CLI.
+		var hookInput struct {
+			HookEventName HookEvent `json:"hook_event_name"`
+		}
+		_ = json.Unmarshal(envelope.Request.Input, &hookInput)
+
+		output, err := fn(hookInput.HookEventName, envelope.Request.Input, envelope.Request.ToolUseID)
+		if err != nil {
+			_ = write(map[string]any{
+				"type": "control_response",
+				"response": map[string]any{
+					"subtype":    "error",
+					"request_id": envelope.RequestID,
+					"error":      err.Error(),
+				},
+			})
+			return
 		}
 		resp := map[string]any{
 			"subtype":    "success",
@@ -425,11 +440,6 @@ func routeControlResponse(line []byte, s *Stream) {
 // session start. This is how system prompt, MCP servers, agents, hooks, and
 // output format are passed in bidirectional mode, matching the TS SDK behaviour.
 func initializeMsg(opts *Options, hooksConfig map[string]any) any {
-	servers := any(map[string]any{})
-	if len(opts.McpServers) > 0 {
-		servers = opts.McpServers
-	}
-
 	agents := any(map[string]any{})
 	if len(opts.Agents) > 0 {
 		m := make(map[string]any, len(opts.Agents))
@@ -449,10 +459,16 @@ func initializeMsg(opts *Options, hooksConfig map[string]any) any {
 		"subtype":            "initialize",
 		"systemPrompt":       systemPromptVal,
 		"appendSystemPrompt": opts.AppendSystemPrompt,
-		"sdkMcpServers":      servers,
 		"hooks":              hooksConfig,
 		"agents":             agents,
 		"promptSuggestions":  opts.PromptSuggestions,
+	}
+
+	// Only send sdkMcpServers when there is something to send: the CLI rejects
+	// the whole initialize ("must be arrays of strings") on an empty object,
+	// which would take hooks and agents down with it.
+	if len(opts.McpServers) > 0 {
+		req["sdkMcpServers"] = opts.McpServers
 	}
 
 	if opts.OutputFormat != nil {
