@@ -38,7 +38,7 @@ func callbackIDs(t *testing.T, m map[string]any) []string {
 	return ids
 }
 
-func noopHook(*HookOutput) HookFunc {
+func noopHook() HookFunc {
 	return func(HookEvent, json.RawMessage, string) (*HookOutput, error) { return nil, nil }
 }
 
@@ -109,8 +109,8 @@ func TestBuildHooksForInitialize_GroupsCallbacksPerMatcher(t *testing.T) {
 func TestBuildHooksForInitialize_MultipleMatchers(t *testing.T) {
 	hooks := map[HookEvent][]HookMatcher{
 		HookEventPreToolUse: {
-			{Matcher: "Bash", Hooks: []HookFunc{noopHook(nil)}},
-			{Matcher: "Write|Edit", Hooks: []HookFunc{noopHook(nil), noopHook(nil)}},
+			{Matcher: "Bash", Hooks: []HookFunc{noopHook()}},
+			{Matcher: "Write|Edit", Hooks: []HookFunc{noopHook(), noopHook()}},
 		},
 	}
 
@@ -135,7 +135,7 @@ func TestBuildHooksForInitialize_MultipleMatchers(t *testing.T) {
 // the official Python SDK, which always emits the key.
 func TestBuildHooksForInitialize_UnsetMatcherIsNull(t *testing.T) {
 	hooks := map[HookEvent][]HookMatcher{
-		HookEventUserPromptSubmit: {{Hooks: []HookFunc{noopHook(nil)}}},
+		HookEventUserPromptSubmit: {{Hooks: []HookFunc{noopHook()}}},
 	}
 
 	cfg, _ := buildHooksForInitialize(hooks)
@@ -164,7 +164,7 @@ func TestBuildHooksForInitialize_UnsetMatcherIsNull(t *testing.T) {
 // A zero timeout is omitted so the CLI applies its own default (60s).
 func TestBuildHooksForInitialize_ZeroTimeoutOmitted(t *testing.T) {
 	hooks := map[HookEvent][]HookMatcher{
-		HookEventPreToolUse: {{Matcher: "Bash", Hooks: []HookFunc{noopHook(nil)}}},
+		HookEventPreToolUse: {{Matcher: "Bash", Hooks: []HookFunc{noopHook()}}},
 	}
 
 	cfg, _ := buildHooksForInitialize(hooks)
@@ -200,7 +200,7 @@ func TestBuildHooksForInitialize_MatchesCapturedCLIShape(t *testing.T) {
 	hooks := map[HookEvent][]HookMatcher{
 		HookEventPreToolUse: {{
 			Matcher: "Bash",
-			Hooks:   []HookFunc{noopHook(nil), noopHook(nil)},
+			Hooks:   []HookFunc{noopHook(), noopHook()},
 			Timeout: 30,
 		}},
 	}

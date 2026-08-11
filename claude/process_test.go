@@ -316,8 +316,31 @@ func TestHandleControlRequest_Elicitation_NilHandler(t *testing.T) {
 
 // A hook_callback control_request carries the event name inside its input
 // payload as hook_event_name; there is no top-level hook_event field on the
-// wire. The line below mirrors the SDKHookCallbackRequest shape.
+// wire. Driven by a payload captured from a real CLI — see testdata/README.md.
 func TestHandleControlRequest_HookCallback_EventNameFromInput(t *testing.T) {
+	line, err := os.ReadFile("testdata/hook_callback_pretooluse.json")
+	if err != nil {
+		t.Fatalf("read captured payload: %v", err)
+	}
+
+	// Guard the premise: the captured payload must carry the event name in the
+	// input and must NOT have a top-level hook_event field.
+	var captured struct {
+		Request struct {
+			HookEvent string                     `json:"hook_event"`
+			Input     map[string]json.RawMessage `json:"input"`
+		} `json:"request"`
+	}
+	if err := json.Unmarshal(line, &captured); err != nil {
+		t.Fatalf("captured payload is not valid JSON: %v", err)
+	}
+	if captured.Request.HookEvent != "" {
+		t.Fatal("captured payload unexpectedly has a top-level hook_event field")
+	}
+	if _, ok := captured.Request.Input["hook_event_name"]; !ok {
+		t.Fatal("captured payload is missing input.hook_event_name")
+	}
+
 	var written []any
 	write := func(v any) error {
 		written = append(written, v)
@@ -334,14 +357,13 @@ func TestHandleControlRequest_HookCallback_EventNameFromInput(t *testing.T) {
 		},
 	}
 
-	line := []byte(`{"type":"control_request","request_id":"r1","request":{"subtype":"hook_callback","callback_id":"cb-1","tool_use_id":"toolu_123","input":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi"}}}}`)
 	handleControlRequest(line, write, defaultOptions(), reg)
 
 	if gotEvent != HookEventPreToolUse {
 		t.Fatalf("expected event %q from input.hook_event_name, got %q", HookEventPreToolUse, gotEvent)
 	}
-	if gotToolUseID != "toolu_123" {
-		t.Fatalf("expected tool_use_id 'toolu_123', got %q", gotToolUseID)
+	if gotToolUseID != "toolu_01Co5gP6ay654HtkuVW6zpK6" {
+		t.Fatalf("expected the captured tool_use_id, got %q", gotToolUseID)
 	}
 	// The raw input is passed through untouched.
 	var input map[string]any
@@ -370,11 +392,33 @@ func TestHandleControlRequest_HookCallback_EventNameFromInput(t *testing.T) {
 	if resp.Type != "control_response" || resp.Response.Subtype != "success" {
 		t.Fatalf("expected success control_response, got %s", b)
 	}
-	if resp.Response.RequestID != "r1" {
-		t.Fatalf("expected request_id 'r1', got %q", resp.Response.RequestID)
+	if resp.Response.RequestID != "6251005c-03c1-4c7f-a2fc-c4cc07a64145" {
+		t.Fatalf("expected the captured request_id to be echoed, got %q", resp.Response.RequestID)
 	}
 	if resp.Response.Response.Decision != "approve" {
 		t.Fatalf("expected decision 'approve', got %q", resp.Response.Response.Decision)
+	}
+}
+
+// Regression guard for the original defect: even if a top-level hook_event
+// field is present, the event name must come from input.hook_event_name. This
+// fails if the envelope field is ever reintroduced and preferred.
+func TestHandleControlRequest_HookCallback_IgnoresEnvelopeHookEvent(t *testing.T) {
+	write := func(any) error { return nil }
+
+	var gotEvent HookEvent
+	reg := hookRegistry{
+		"cb-1": func(event HookEvent, _ json.RawMessage, _ string) (*HookOutput, error) {
+			gotEvent = event
+			return nil, nil
+		},
+	}
+
+	line := []byte(`{"type":"control_request","request_id":"r5","request":{"subtype":"hook_callback","callback_id":"cb-1","hook_event":"Stop","input":{"hook_event_name":"PreToolUse"}}}`)
+	handleControlRequest(line, write, defaultOptions(), reg)
+
+	if gotEvent != HookEventPreToolUse {
+		t.Fatalf("expected input.hook_event_name to win over the envelope field, got %q", gotEvent)
 	}
 }
 
