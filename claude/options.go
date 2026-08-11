@@ -3,6 +3,7 @@ package claude
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -117,6 +118,12 @@ type PermissionContext struct {
 	ToolUseID string
 	// AgentID is set when the request originates from a sub-agent.
 	AgentID string
+	// Title is a short heading for the permission prompt, when the CLI supplies one.
+	Title string
+	// DisplayName is the human-friendly name of the tool being requested.
+	DisplayName string
+	// Description describes what the tool call will do.
+	Description string
 }
 
 // PermissionResult is the return value of a PermissionHandler.
@@ -130,7 +137,9 @@ type PermissionContext struct {
 //   - Message is shown to the user explaining the denial.
 //   - Interrupt, if true, signals the agent to stop entirely.
 type PermissionResult struct {
-	// Behavior is "allow" (default when empty) or "deny".
+	// Behavior is required and must be exactly "allow" or "deny". An empty
+	// string is a usage error, not an implicit allow: the SDK answers the CLI
+	// with an error control_response rather than permitting the tool call.
 	Behavior string
 	// UpdatedInput replaces the tool input before execution (allow only).
 	UpdatedInput map[string]any
@@ -145,7 +154,13 @@ type PermissionResult struct {
 // PermissionHandler is called when claude sends a can_use_tool control_request.
 // ctx contains full context about the request.
 // Return a PermissionResult with Behavior "allow" or "deny".
-// When nil, all tool calls are allowed.
+//
+// Setting a handler makes the SDK pass --permission-prompt-tool stdio, which is
+// what causes the CLI to route tool calls here; it cannot be combined with
+// WithPermissionPromptToolName.
+//
+// When nil, an incoming can_use_tool is answered with an error rather than
+// being allowed — the SDK never grants a permission no one approved.
 type PermissionHandler func(toolName string, input json.RawMessage, ctx PermissionContext) PermissionResult
 
 // ElicitationHandler is called when claude sends an elicitation control_request
@@ -831,8 +846,13 @@ func (o *Options) buildArgs() []string {
 		args = append(args, "--strict-mcp-config")
 	}
 
-	if o.PermissionPromptToolName != "" {
-		args = append(args, "--permission-prompt-tool-name", o.PermissionPromptToolName)
+	// A registered handler is routed over stdio; an explicit tool name selects an
+	// MCP tool instead. validate() guarantees the two are never both set.
+	switch {
+	case o.PermissionPromptToolName != "":
+		args = append(args, "--permission-prompt-tool", o.PermissionPromptToolName)
+	case o.PermissionHandler != nil:
+		args = append(args, "--permission-prompt-tool", "stdio")
 	}
 
 	// Plugins: each plugin gets its own --plugin-dir flag.
@@ -898,4 +918,49 @@ func (o *Options) buildArgs() []string {
 	// the current CLI. The field is retained in Options for future compatibility.
 
 	return args
+}
+
+// validate reports usage errors that would otherwise surface as confusing CLI
+// failures or, worse, as silently missing enforcement.
+func (o *Options) validate() error {
+	if o.PermissionHandler != nil && o.PermissionPromptToolName != "" {
+		return fmt.Errorf(
+			"claude: WithPermissionHandler cannot be used with WithPermissionPromptToolName: " +
+				"a handler is served over --permission-prompt-tool stdio, which would override the named tool")
+	}
+	return nil
+}
+
+// warnPermissionHandlerShadowed emits a one-time warning when a permission
+// handler is registered but cannot be reached, because the configuration grants
+// the tools up front. Without it the handler simply never fires and the caller
+// believes their policy is being enforced.
+//
+// The warning goes to the Stderr callback when one is set, so it lands wherever
+// the caller already routes CLI output, and to os.Stderr otherwise.
+func warnPermissionHandlerShadowed(o *Options) {
+	if o.PermissionHandler == nil {
+		return
+	}
+
+	var reason string
+	switch {
+	case o.PermissionMode == PermissionModeBypassPermissions:
+		reason = "PermissionMode is " + string(PermissionModeBypassPermissions)
+	case o.AllowDangerouslySkipPermissions:
+		reason = "AllowDangerouslySkipPermissions is set"
+	case len(o.AllowedTools) > 0:
+		reason = fmt.Sprintf("AllowedTools pre-approves %s", strings.Join(o.AllowedTools, ", "))
+	default:
+		return
+	}
+
+	msg := "claude: warning: a PermissionHandler is registered but will not be consulted for every tool call because " +
+		reason + "; use WithDefaultPermissions() to have tool calls routed to the handler"
+
+	if o.Stderr != nil {
+		o.Stderr(msg)
+		return
+	}
+	fmt.Fprintln(os.Stderr, msg)
 }

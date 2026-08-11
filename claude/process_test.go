@@ -526,3 +526,226 @@ func TestInitializeMsg_OmitsEmptySdkMcpServers(t *testing.T) {
 		t.Fatalf("expected sdkMcpServers to be omitted when empty, got %s", b)
 	}
 }
+
+// ─── can_use_tool (#17) ──────────────────────────────────────────────────────
+
+// canUseToolResponse runs the captured can_use_tool request through the handler
+// and returns the inner response object of the control_response.
+func canUseToolResponse(t *testing.T, opts *Options) (map[string]any, map[string]any) {
+	t.Helper()
+
+	line, err := os.ReadFile("testdata/can_use_tool_write.json")
+	if err != nil {
+		t.Fatalf("read captured payload: %v", err)
+	}
+
+	var written []any
+	write := func(v any) error {
+		written = append(written, v)
+		return nil
+	}
+
+	handleControlRequest(line, write, opts, hookRegistry{})
+
+	if len(written) != 1 {
+		t.Fatalf("expected exactly 1 control_response, got %d", len(written))
+	}
+	b, _ := json.Marshal(written[0])
+	var envelope struct {
+		Response map[string]any `json:"response"`
+	}
+	if err := json.Unmarshal(b, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	inner, _ := envelope.Response["response"].(map[string]any)
+	return envelope.Response, inner
+}
+
+// A missing handler must never be answered with an allow. The CLI treats the
+// response as authoritative, so failing open here silently grants every tool
+// call — the highest-severity defect in this batch.
+func TestHandleControlRequest_CanUseTool_NoHandlerFailsClosed(t *testing.T) {
+	outer, _ := canUseToolResponse(t, defaultOptions())
+
+	if outer["subtype"] != "error" {
+		t.Fatalf("expected an error control_response with no handler, got %v", outer)
+	}
+	if !strings.Contains(outer["error"].(string), "canUseTool callback is not provided") {
+		t.Fatalf("expected the officials' message, got %v", outer["error"])
+	}
+	if _, leaked := outer["response"]; leaked {
+		t.Fatal("an error response must not carry a permission decision")
+	}
+}
+
+// Deny must serialise as the behavior union the CLI validates. Verified live:
+// this exact response blocked a real Write, which came back is_error with
+// non_execution_kind "permission-rule".
+func TestHandleControlRequest_CanUseTool_Deny(t *testing.T) {
+	opts := defaultOptions()
+	opts.PermissionHandler = func(string, json.RawMessage, PermissionContext) PermissionResult {
+		return PermissionResult{Behavior: "deny", Message: "nope", Interrupt: true}
+	}
+
+	outer, inner := canUseToolResponse(t, opts)
+
+	if outer["subtype"] != "success" {
+		t.Fatalf("expected success control_response, got %v", outer)
+	}
+	if inner["behavior"] != "deny" {
+		t.Fatalf("expected behavior deny, got %v", inner)
+	}
+	if inner["message"] != "nope" {
+		t.Fatalf("expected the denial message, got %v", inner["message"])
+	}
+	if inner["interrupt"] != true {
+		t.Fatalf("expected interrupt to ride along, got %v", inner["interrupt"])
+	}
+	if _, legacy := inner["allowed"]; legacy {
+		t.Fatal("the legacy {\"allowed\": bool} shape must not be sent")
+	}
+}
+
+func TestHandleControlRequest_CanUseTool_DenyOmitsInterruptWhenFalse(t *testing.T) {
+	opts := defaultOptions()
+	opts.PermissionHandler = func(string, json.RawMessage, PermissionContext) PermissionResult {
+		return PermissionResult{Behavior: "deny", Message: "nope"}
+	}
+
+	_, inner := canUseToolResponse(t, opts)
+
+	if _, present := inner["interrupt"]; present {
+		t.Fatalf("interrupt should be omitted when false, got %v", inner["interrupt"])
+	}
+}
+
+// allow with no rewrite echoes the original input back verbatim; the CLI runs
+// whatever updatedInput carries, so dropping it would run an empty input.
+func TestHandleControlRequest_CanUseTool_AllowEchoesOriginalInput(t *testing.T) {
+	opts := defaultOptions()
+	opts.PermissionHandler = func(string, json.RawMessage, PermissionContext) PermissionResult {
+		return PermissionResult{Behavior: "allow"}
+	}
+
+	_, inner := canUseToolResponse(t, opts)
+
+	if inner["behavior"] != "allow" {
+		t.Fatalf("expected behavior allow, got %v", inner)
+	}
+	echoed, err := json.Marshal(inner["updatedInput"])
+	if err != nil {
+		t.Fatalf("marshal updatedInput: %v", err)
+	}
+	var got, want map[string]any
+	_ = json.Unmarshal(echoed, &got)
+	_ = json.Unmarshal([]byte(`{"file_path":"/tmp/perm-capture-test.txt","content":"hello"}`), &want)
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("expected the original input echoed back, got %s", echoed)
+	}
+}
+
+func TestHandleControlRequest_CanUseTool_AllowWithUpdatedInput(t *testing.T) {
+	opts := defaultOptions()
+	opts.PermissionHandler = func(string, json.RawMessage, PermissionContext) PermissionResult {
+		return PermissionResult{
+			Behavior:     "allow",
+			UpdatedInput: map[string]any{"file_path": "/tmp/safe.txt", "content": "hello"},
+			UpdatedPermissions: []PermissionUpdate{{
+				Type:        "addRules",
+				Behavior:    PermissionBehaviorAllow,
+				Destination: PermissionUpdateDestinationSession,
+			}},
+		}
+	}
+
+	_, inner := canUseToolResponse(t, opts)
+
+	updated, ok := inner["updatedInput"].(map[string]any)
+	if !ok || updated["file_path"] != "/tmp/safe.txt" {
+		t.Fatalf("expected the handler's updatedInput to win, got %v", inner["updatedInput"])
+	}
+	if _, present := inner["updatedPermissions"]; !present {
+		t.Fatal("expected updatedPermissions to be forwarded")
+	}
+}
+
+// An unset Behavior is a usage error. Treating the zero value as allow is
+// exactly the fail-open bug this issue fixes.
+func TestHandleControlRequest_CanUseTool_EmptyBehaviorIsError(t *testing.T) {
+	opts := defaultOptions()
+	opts.PermissionHandler = func(string, json.RawMessage, PermissionContext) PermissionResult {
+		return PermissionResult{}
+	}
+
+	outer, _ := canUseToolResponse(t, opts)
+
+	if outer["subtype"] != "error" {
+		t.Fatalf("expected an error for an empty Behavior, got %v", outer)
+	}
+	if !strings.Contains(outer["error"].(string), "must be") {
+		t.Fatalf("error should explain the allowed values, got %v", outer["error"])
+	}
+}
+
+// The display fields the CLI actually sends must reach the handler, otherwise
+// it cannot tell the user what it is being asked to approve.
+func TestHandleControlRequest_CanUseTool_ContextFields(t *testing.T) {
+	var gotTool string
+	var gotCtx PermissionContext
+
+	opts := defaultOptions()
+	opts.PermissionHandler = func(tool string, _ json.RawMessage, ctx PermissionContext) PermissionResult {
+		gotTool, gotCtx = tool, ctx
+		return PermissionResult{Behavior: "allow"}
+	}
+
+	canUseToolResponse(t, opts)
+
+	if gotTool != "Write" {
+		t.Fatalf("expected tool name Write, got %q", gotTool)
+	}
+	if gotCtx.DisplayName != "Write" {
+		t.Fatalf("expected DisplayName Write, got %q", gotCtx.DisplayName)
+	}
+	if gotCtx.Description != "/tmp/perm-capture-test.txt" {
+		t.Fatalf("expected Description from the wire, got %q", gotCtx.Description)
+	}
+	if gotCtx.DecisionReason != "Path is outside allowed working directories" {
+		t.Fatalf("expected DecisionReason from the wire, got %q", gotCtx.DecisionReason)
+	}
+	if gotCtx.ToolUseID != "toolu_01LV72SLWZsGwZ11XF4RgUWZ" {
+		t.Fatalf("expected ToolUseID from the wire, got %q", gotCtx.ToolUseID)
+	}
+	if len(gotCtx.Suggestions) != 2 {
+		t.Fatalf("expected 2 permission suggestions, got %d", len(gotCtx.Suggestions))
+	}
+	if gotCtx.Suggestions[0].Type != "setMode" || gotCtx.Suggestions[0].Mode != PermissionModeAcceptEdits {
+		t.Fatalf("expected the setMode suggestion decoded, got %+v", gotCtx.Suggestions[0])
+	}
+}
+
+// The captured payload carries display_name and description but no title, so
+// title decoding is covered here with a synthetic request. Title is part of the
+// documented context; without this nothing proves the field is wired.
+func TestHandleControlRequest_CanUseTool_TitleDecoded(t *testing.T) {
+	var gotCtx PermissionContext
+
+	opts := defaultOptions()
+	opts.PermissionHandler = func(_ string, _ json.RawMessage, pctx PermissionContext) PermissionResult {
+		gotCtx = pctx
+		return PermissionResult{Behavior: "allow"}
+	}
+
+	line := []byte(`{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Write","title":"Allow file write?","display_name":"Write","description":"/tmp/x.txt","blocked_path":"/tmp","agent_id":"agent-7","input":{}}}`)
+	handleControlRequest(line, func(any) error { return nil }, opts, hookRegistry{})
+
+	if gotCtx.Title != "Allow file write?" {
+		t.Fatalf("expected Title from the wire, got %q", gotCtx.Title)
+	}
+	if gotCtx.BlockedPath != "/tmp" {
+		t.Fatalf("expected BlockedPath from the wire, got %q", gotCtx.BlockedPath)
+	}
+	if gotCtx.AgentID != "agent-7" {
+		t.Fatalf("expected AgentID from the wire, got %q", gotCtx.AgentID)
+	}
+}

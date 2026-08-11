@@ -43,7 +43,7 @@ func (s *Stream) SetModel(model string) error {
 // Blocks until the CLI acknowledges the change or the context is cancelled.
 func (s *Stream) SetPermissionMode(mode PermissionMode) error {
 	return s.sendControlRequest("set_permission_mode", map[string]any{
-		"permission_mode": string(mode),
+		"mode": string(mode),
 	})
 }
 
@@ -237,12 +237,24 @@ func Run(ctx context.Context, prompt string, opts ...Option) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	return resultFromStream(stream)
+}
 
+// resultFromStream drains a stream and returns its final result, converting
+// error results and process-level failures into Go errors.
+func resultFromStream(stream *Stream) (*Result, error) {
 	for event := range stream.Events() {
 		switch event.Type {
 
 		case TypeResult:
 			r := event.Result
+			// parseLine leaves Result nil when the payload does not decode.
+			// Report that instead of dereferencing it — a library must not
+			// panic because the CLI sent a field shape we do not model yet.
+			if r == nil {
+				return nil, fmt.Errorf("claude: could not decode the result message: %s",
+					truncate(string(event.Raw), 512))
+			}
 			if r.IsError {
 				msg := r.Subtype
 				if len(r.Errors) > 0 {
@@ -262,4 +274,13 @@ func Run(ctx context.Context, prompt string, opts ...Option) (*Result, error) {
 	}
 
 	return nil, fmt.Errorf("claude: agent finished without a result message")
+}
+
+// truncate shortens s for inclusion in an error message. A result payload runs
+// to several kilobytes; the head is enough to identify the offending shape.
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "… (truncated)"
 }
