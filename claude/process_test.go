@@ -723,3 +723,29 @@ func TestHandleControlRequest_CanUseTool_ContextFields(t *testing.T) {
 		t.Fatalf("expected the setMode suggestion decoded, got %+v", gotCtx.Suggestions[0])
 	}
 }
+
+// The captured payload carries display_name and description but no title, so
+// title decoding is covered here with a synthetic request. Title is part of the
+// documented context; without this nothing proves the field is wired.
+func TestHandleControlRequest_CanUseTool_TitleDecoded(t *testing.T) {
+	var gotCtx PermissionContext
+
+	opts := defaultOptions()
+	opts.PermissionHandler = func(_ string, _ json.RawMessage, pctx PermissionContext) PermissionResult {
+		gotCtx = pctx
+		return PermissionResult{Behavior: "allow"}
+	}
+
+	line := []byte(`{"type":"control_request","request_id":"r1","request":{"subtype":"can_use_tool","tool_name":"Write","title":"Allow file write?","display_name":"Write","description":"/tmp/x.txt","blocked_path":"/tmp","agent_id":"agent-7","input":{}}}`)
+	handleControlRequest(line, func(any) error { return nil }, opts, hookRegistry{})
+
+	if gotCtx.Title != "Allow file write?" {
+		t.Fatalf("expected Title from the wire, got %q", gotCtx.Title)
+	}
+	if gotCtx.BlockedPath != "/tmp" {
+		t.Fatalf("expected BlockedPath from the wire, got %q", gotCtx.BlockedPath)
+	}
+	if gotCtx.AgentID != "agent-7" {
+		t.Fatalf("expected AgentID from the wire, got %q", gotCtx.AgentID)
+	}
+}

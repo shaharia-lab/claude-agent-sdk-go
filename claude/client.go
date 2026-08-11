@@ -237,7 +237,12 @@ func Run(ctx context.Context, prompt string, opts ...Option) (*Result, error) {
 	if err != nil {
 		return nil, err
 	}
+	return resultFromStream(stream)
+}
 
+// resultFromStream drains a stream and returns its final result, converting
+// error results and process-level failures into Go errors.
+func resultFromStream(stream *Stream) (*Result, error) {
 	for event := range stream.Events() {
 		switch event.Type {
 
@@ -247,7 +252,8 @@ func Run(ctx context.Context, prompt string, opts ...Option) (*Result, error) {
 			// Report that instead of dereferencing it — a library must not
 			// panic because the CLI sent a field shape we do not model yet.
 			if r == nil {
-				return nil, fmt.Errorf("claude: could not decode the result message: %s", event.Raw)
+				return nil, fmt.Errorf("claude: could not decode the result message: %s",
+					truncate(string(event.Raw), 512))
 			}
 			if r.IsError {
 				msg := r.Subtype
@@ -268,4 +274,13 @@ func Run(ctx context.Context, prompt string, opts ...Option) (*Result, error) {
 	}
 
 	return nil, fmt.Errorf("claude: agent finished without a result message")
+}
+
+// truncate shortens s for inclusion in an error message. A result payload runs
+// to several kilobytes; the head is enough to identify the offending shape.
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "… (truncated)"
 }
