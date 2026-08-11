@@ -2,6 +2,7 @@ package claude
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -310,5 +311,174 @@ func TestHandleControlRequest_Elicitation_NilHandler(t *testing.T) {
 	inner := respObj["response"].(map[string]any)
 	if inner["cancel"] != true {
 		t.Fatalf("expected cancel=true, got %v", inner["cancel"])
+	}
+}
+
+// A hook_callback control_request carries the event name inside its input
+// payload as hook_event_name; there is no top-level hook_event field on the
+// wire. The line below mirrors the SDKHookCallbackRequest shape.
+func TestHandleControlRequest_HookCallback_EventNameFromInput(t *testing.T) {
+	var written []any
+	write := func(v any) error {
+		written = append(written, v)
+		return nil
+	}
+
+	var gotEvent HookEvent
+	var gotToolUseID string
+	var gotInput json.RawMessage
+	reg := hookRegistry{
+		"cb-1": func(event HookEvent, input json.RawMessage, toolUseID string) (*HookOutput, error) {
+			gotEvent, gotInput, gotToolUseID = event, input, toolUseID
+			return &HookOutput{Decision: "approve"}, nil
+		},
+	}
+
+	line := []byte(`{"type":"control_request","request_id":"r1","request":{"subtype":"hook_callback","callback_id":"cb-1","tool_use_id":"toolu_123","input":{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"echo hi"}}}}`)
+	handleControlRequest(line, write, defaultOptions(), reg)
+
+	if gotEvent != HookEventPreToolUse {
+		t.Fatalf("expected event %q from input.hook_event_name, got %q", HookEventPreToolUse, gotEvent)
+	}
+	if gotToolUseID != "toolu_123" {
+		t.Fatalf("expected tool_use_id 'toolu_123', got %q", gotToolUseID)
+	}
+	// The raw input is passed through untouched.
+	var input map[string]any
+	if err := json.Unmarshal(gotInput, &input); err != nil {
+		t.Fatalf("input is not valid JSON: %v", err)
+	}
+	if input["tool_name"] != "Bash" {
+		t.Fatalf("expected raw input to be passed through, got %v", input)
+	}
+
+	if len(written) != 1 {
+		t.Fatalf("expected 1 write, got %d", len(written))
+	}
+	b, _ := json.Marshal(written[0])
+	var resp struct {
+		Type     string `json:"type"`
+		Response struct {
+			Subtype   string     `json:"subtype"`
+			RequestID string     `json:"request_id"`
+			Response  HookOutput `json:"response"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(b, &resp); err != nil {
+		t.Fatalf("unmarshal response: %v", err)
+	}
+	if resp.Type != "control_response" || resp.Response.Subtype != "success" {
+		t.Fatalf("expected success control_response, got %s", b)
+	}
+	if resp.Response.RequestID != "r1" {
+		t.Fatalf("expected request_id 'r1', got %q", resp.Response.RequestID)
+	}
+	if resp.Response.Response.Decision != "approve" {
+		t.Fatalf("expected decision 'approve', got %q", resp.Response.Response.Decision)
+	}
+}
+
+// A missing hook_event_name must not drop the reply — a missing reply hangs
+// the CLI — the callback just receives an empty event.
+func TestHandleControlRequest_HookCallback_MissingEventName(t *testing.T) {
+	var written []any
+	write := func(v any) error {
+		written = append(written, v)
+		return nil
+	}
+
+	called := false
+	var gotEvent HookEvent
+	reg := hookRegistry{
+		"cb-1": func(event HookEvent, _ json.RawMessage, _ string) (*HookOutput, error) {
+			called, gotEvent = true, event
+			return nil, nil
+		},
+	}
+
+	line := []byte(`{"type":"control_request","request_id":"r2","request":{"subtype":"hook_callback","callback_id":"cb-1","input":{"tool_name":"Bash"}}}`)
+	handleControlRequest(line, write, defaultOptions(), reg)
+
+	if !called {
+		t.Fatal("expected the callback to still be invoked")
+	}
+	if gotEvent != "" {
+		t.Fatalf("expected empty event, got %q", gotEvent)
+	}
+	if len(written) != 1 {
+		t.Fatalf("expected 1 write (a reply is mandatory), got %d", len(written))
+	}
+	b, _ := json.Marshal(written[0])
+	if !strings.Contains(string(b), `"subtype":"success"`) {
+		t.Fatalf("expected success response, got %s", b)
+	}
+}
+
+// An unknown callback ID is an error, not a silent success — matching the
+// official Python SDK, which raises "No hook callback found for ID".
+func TestHandleControlRequest_HookCallback_UnknownCallbackID(t *testing.T) {
+	var written []any
+	write := func(v any) error {
+		written = append(written, v)
+		return nil
+	}
+
+	line := []byte(`{"type":"control_request","request_id":"r3","request":{"subtype":"hook_callback","callback_id":"nope","input":{"hook_event_name":"PreToolUse"}}}`)
+	handleControlRequest(line, write, defaultOptions(), hookRegistry{})
+
+	if len(written) != 1 {
+		t.Fatalf("expected 1 write, got %d", len(written))
+	}
+	b, _ := json.Marshal(written[0])
+	if !strings.Contains(string(b), `"subtype":"error"`) {
+		t.Fatalf("expected an error control_response, got %s", b)
+	}
+	if !strings.Contains(string(b), "nope") {
+		t.Fatalf("expected the unknown callback ID in the error, got %s", b)
+	}
+}
+
+// A hook returning an error replies with an error control_response.
+func TestHandleControlRequest_HookCallback_HookError(t *testing.T) {
+	var written []any
+	write := func(v any) error {
+		written = append(written, v)
+		return nil
+	}
+
+	reg := hookRegistry{
+		"cb-1": func(HookEvent, json.RawMessage, string) (*HookOutput, error) {
+			return nil, errors.New("policy denied")
+		},
+	}
+
+	line := []byte(`{"type":"control_request","request_id":"r4","request":{"subtype":"hook_callback","callback_id":"cb-1","input":{"hook_event_name":"PreToolUse"}}}`)
+	handleControlRequest(line, write, defaultOptions(), reg)
+
+	b, _ := json.Marshal(written[0])
+	if !strings.Contains(string(b), `"subtype":"error"`) || !strings.Contains(string(b), "policy denied") {
+		t.Fatalf("expected error response carrying the hook error, got %s", b)
+	}
+}
+
+// The CLI rejects the entire initialize when sdkMcpServers is an empty object
+// ("sdkMcpServers and webSearchIsolationExemptMcpServers must be arrays of
+// strings"), which would take hooks down with it, so the key is omitted when
+// there are no servers.
+func TestInitializeMsg_OmitsEmptySdkMcpServers(t *testing.T) {
+	msg := initializeMsg(defaultOptions(), map[string]any{})
+
+	b, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var envelope struct {
+		Request map[string]json.RawMessage `json:"request"`
+	}
+	if err := json.Unmarshal(b, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, present := envelope.Request["sdkMcpServers"]; present {
+		t.Fatalf("expected sdkMcpServers to be omitted when empty, got %s", b)
 	}
 }
