@@ -43,7 +43,7 @@ func (s *Stream) SetModel(model string) error {
 // Blocks until the CLI acknowledges the change or the context is cancelled.
 func (s *Stream) SetPermissionMode(mode PermissionMode) error {
 	return s.sendControlRequest("set_permission_mode", map[string]any{
-		"permission_mode": string(mode),
+		"mode": string(mode),
 	})
 }
 
@@ -243,6 +243,12 @@ func Run(ctx context.Context, prompt string, opts ...Option) (*Result, error) {
 
 		case TypeResult:
 			r := event.Result
+			// parseLine leaves Result nil when the payload does not decode.
+			// Report that instead of dereferencing it — a library must not
+			// panic because the CLI sent a field shape we do not model yet.
+			if r == nil {
+				return nil, fmt.Errorf("claude: could not decode the result message: %s", event.Raw)
+			}
 			if r.IsError {
 				msg := r.Subtype
 				if len(r.Errors) > 0 {

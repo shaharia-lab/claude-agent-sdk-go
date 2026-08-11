@@ -2,6 +2,7 @@ package claude
 
 import (
 	"encoding/json"
+	"os"
 	"testing"
 )
 
@@ -216,5 +217,47 @@ func TestParseLine_NewTypesRawOnly(t *testing.T) {
 		if event.Raw == nil {
 			t.Fatalf("expected Raw to be non-nil for type %q", typ)
 		}
+	}
+}
+
+// permission_denials is an array of objects, not strings. Typing it as []string
+// made the whole result message fail to decode the moment a tool was actually
+// denied — which only became reachable once the can_use_tool route worked (#17).
+func TestParseLine_ResultWithPermissionDenials(t *testing.T) {
+	line, err := os.ReadFile("testdata/result_with_permission_denials.json")
+	if err != nil {
+		t.Fatalf("read captured payload: %v", err)
+	}
+
+	event, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if event.Type != TypeResult {
+		t.Fatalf("expected a result event, got %s", event.Type)
+	}
+	if event.Result == nil {
+		t.Fatal("Result is nil — the captured payload failed to decode")
+	}
+
+	denials := event.Result.PermissionDenials
+	if len(denials) != 2 {
+		t.Fatalf("expected 2 denials, got %d", len(denials))
+	}
+	if denials[0].ToolName != "Write" {
+		t.Fatalf("expected first denial for Write, got %q", denials[0].ToolName)
+	}
+	if denials[0].ToolUseID != "toolu_01JZCDnureJXbXNHAAfRDt36" {
+		t.Fatalf("unexpected tool_use_id %q", denials[0].ToolUseID)
+	}
+	var input map[string]any
+	if err := json.Unmarshal(denials[0].ToolInput, &input); err != nil {
+		t.Fatalf("tool_input should be preserved as raw JSON: %v", err)
+	}
+	if input["file_path"] != "/tmp/claude-sdk-raw.txt" {
+		t.Fatalf("unexpected tool_input %v", input)
+	}
+	if denials[1].ToolName != "Bash" {
+		t.Fatalf("expected second denial for Bash, got %q", denials[1].ToolName)
 	}
 }

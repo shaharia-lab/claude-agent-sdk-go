@@ -135,6 +135,37 @@ result, err := claude.Run(ctx, "List the Go files in the current directory.",
 )
 ```
 
+### Approving tool calls in your own code
+
+Register a permission handler and the CLI asks your code before running a tool:
+
+```go
+result, err := claude.Run(ctx, "Clean up the temporary files in /tmp.",
+    claude.WithPermissionHandler(func(tool string, input json.RawMessage, pctx claude.PermissionContext) claude.PermissionResult {
+        if tool == "Bash" {
+            return claude.PermissionResult{Behavior: "deny", Message: "no shell commands"}
+        }
+        return claude.PermissionResult{Behavior: "allow"}
+    }),
+    claude.WithDefaultPermissions(),
+)
+```
+
+`Behavior` is required and must be `"allow"` or `"deny"`. Three things are worth
+knowing:
+
+- **`WithDefaultPermissions()` is usually required.** The SDK currently defaults
+  to `bypassPermissions`, which pre-approves everything, so the CLI never asks
+  and your handler never runs. The SDK prints a warning when it detects this (or
+  an `AllowedTools` list) shadowing a registered handler.
+- **It fails closed.** If the CLI asks and no handler is registered, or the
+  handler returns an empty `Behavior`, the SDK answers with an error rather than
+  allowing the call.
+- **It is mutually exclusive with `WithPermissionPromptToolName`.** A handler is
+  served over `--permission-prompt-tool stdio`; setting both returns an error.
+
+Denied calls are reported on the final result as `Result.PermissionDenials`.
+
 ### In-process MCP server (HTTP)
 
 Register a Go MCP server directly in your process — no separate binary needed:

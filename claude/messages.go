@@ -178,7 +178,18 @@ type Result struct {
 	// with type "json" or "json_schema" was requested.
 	StructuredOutput any `json:"structured_output,omitempty"`
 	// PermissionDenials lists any tool calls that were denied during the run.
-	PermissionDenials []string `json:"permission_denials,omitempty"`
+	PermissionDenials []PermissionDenial `json:"permission_denials,omitempty"`
+}
+
+// PermissionDenial describes one tool call that was refused during a run,
+// as reported in the final result message.
+type PermissionDenial struct {
+	// ToolName is the tool that was denied (e.g. "Write").
+	ToolName string `json:"tool_name"`
+	// ToolUseID identifies the specific denied call.
+	ToolUseID string `json:"tool_use_id"`
+	// ToolInput is the raw input the tool would have been invoked with.
+	ToolInput json.RawMessage `json:"tool_input,omitempty"`
 }
 
 // ─── System message ────────────────────────────────────────────────────────────

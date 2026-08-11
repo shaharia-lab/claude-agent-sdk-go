@@ -38,6 +38,11 @@ type controlResponse struct {
 // the subprocess exits, or ctx is cancelled. Callers should always range until
 // the channel closes.
 func spawnAndStream(ctx context.Context, opts *Options, prompt string) (*Stream, error) {
+	if err := opts.validate(); err != nil {
+		return nil, err
+	}
+	warnPermissionHandlerShadowed(opts)
+
 	args := opts.buildArgs()
 
 	cmd := exec.Command(opts.ClaudeExecutable, args...)
@@ -240,6 +245,19 @@ func spawnAndStream(ctx context.Context, opts *Options, prompt string) (*Stream,
 	return stream, nil
 }
 
+// writeControlError answers a control_request with an error control_response.
+// Every inbound request must be answered — a missing reply hangs the CLI.
+func writeControlError(write func(any) error, requestID, msg string) {
+	_ = write(map[string]any{
+		"type": "control_response",
+		"response": map[string]any{
+			"subtype":    "error",
+			"request_id": requestID,
+			"error":      msg,
+		},
+	})
+}
+
 // handleControlRequest inspects a raw JSON line from claude's stdout to see if
 // it is a control_request. If so it writes the appropriate control_response to
 // stdin. Returns false and does nothing for non-control_request messages.
@@ -258,6 +276,9 @@ func handleControlRequest(line []byte, write func(any) error, opts *Options, hoo
 			BlockedPath    string             `json:"blocked_path,omitempty"`
 			DecisionReason string             `json:"decision_reason,omitempty"`
 			AgentID        string             `json:"agent_id,omitempty"`
+			Title          string             `json:"title,omitempty"`
+			DisplayName    string             `json:"display_name,omitempty"`
+			Description    string             `json:"description,omitempty"`
 
 			// hook_callback fields
 			CallbackID string `json:"callback_id,omitempty"`
@@ -274,34 +295,56 @@ func handleControlRequest(line []byte, write func(any) error, opts *Options, hoo
 
 	switch envelope.Request.Subtype {
 	case "can_use_tool":
-		result := PermissionResult{Behavior: "allow"}
-		if opts.PermissionHandler != nil {
-			permCtx := PermissionContext{
-				Suggestions:    envelope.Request.Suggestions,
-				BlockedPath:    envelope.Request.BlockedPath,
-				DecisionReason: envelope.Request.DecisionReason,
-				ToolUseID:      envelope.Request.ToolUseID,
-				AgentID:        envelope.Request.AgentID,
+		// Fail closed. Answering a permission question nobody was asked would
+		// grant the tool call, so an absent handler is an error, never an allow.
+		if opts.PermissionHandler == nil {
+			writeControlError(write, envelope.RequestID, "canUseTool callback is not provided")
+			return
+		}
+
+		permCtx := PermissionContext{
+			Suggestions:    envelope.Request.Suggestions,
+			BlockedPath:    envelope.Request.BlockedPath,
+			DecisionReason: envelope.Request.DecisionReason,
+			ToolUseID:      envelope.Request.ToolUseID,
+			AgentID:        envelope.Request.AgentID,
+			Title:          envelope.Request.Title,
+			DisplayName:    envelope.Request.DisplayName,
+			Description:    envelope.Request.Description,
+		}
+		result := opts.PermissionHandler(envelope.Request.ToolName, envelope.Request.Input, permCtx)
+
+		var resp map[string]any
+		switch result.Behavior {
+		case "allow":
+			resp = map[string]any{"behavior": "allow"}
+			// The CLI expects the input it should actually run; when the handler
+			// does not rewrite it, echo the original back verbatim.
+			if result.UpdatedInput != nil {
+				resp["updatedInput"] = result.UpdatedInput
+			} else {
+				resp["updatedInput"] = envelope.Request.Input
 			}
-			result = opts.PermissionHandler(envelope.Request.ToolName, envelope.Request.Input, permCtx)
+			if len(result.UpdatedPermissions) > 0 {
+				resp["updatedPermissions"] = result.UpdatedPermissions
+			}
+		case "deny":
+			resp = map[string]any{
+				"behavior": "deny",
+				"message":  result.Message,
+			}
+			if result.Interrupt {
+				resp["interrupt"] = true
+			}
+		default:
+			// Includes the zero value: an unset Behavior is a usage error, and
+			// treating it as "allow" is exactly the fail-open bug being fixed.
+			writeControlError(write, envelope.RequestID, fmt.Sprintf(
+				"PermissionHandler returned invalid Behavior %q: must be \"allow\" or \"deny\"",
+				result.Behavior))
+			return
 		}
-		allowed := result.Behavior != "deny"
-		resp := map[string]any{
-			"allowed":   allowed,
-			"toolUseID": envelope.Request.ToolUseID,
-		}
-		if result.UpdatedInput != nil {
-			resp["updatedInput"] = result.UpdatedInput
-		}
-		if len(result.UpdatedPermissions) > 0 {
-			resp["updatedPermissions"] = result.UpdatedPermissions
-		}
-		if result.Message != "" {
-			resp["message"] = result.Message
-		}
-		if result.Interrupt {
-			resp["interrupt"] = true
-		}
+
 		_ = write(map[string]any{
 			"type": "control_response",
 			"response": map[string]any{
@@ -314,14 +357,8 @@ func handleControlRequest(line []byte, write func(any) error, opts *Options, hoo
 	case "hook_callback":
 		fn, ok := hookReg[envelope.Request.CallbackID]
 		if !ok {
-			_ = write(map[string]any{
-				"type": "control_response",
-				"response": map[string]any{
-					"subtype":    "error",
-					"request_id": envelope.RequestID,
-					"error":      "no hook callback found for ID: " + envelope.Request.CallbackID,
-				},
-			})
+			writeControlError(write, envelope.RequestID,
+				"no hook callback found for ID: "+envelope.Request.CallbackID)
 			return
 		}
 		// The event name travels inside the hook input payload, not on the
@@ -334,14 +371,7 @@ func handleControlRequest(line []byte, write func(any) error, opts *Options, hoo
 
 		output, err := fn(hookInput.HookEventName, envelope.Request.Input, envelope.Request.ToolUseID)
 		if err != nil {
-			_ = write(map[string]any{
-				"type": "control_response",
-				"response": map[string]any{
-					"subtype":    "error",
-					"request_id": envelope.RequestID,
-					"error":      err.Error(),
-				},
-			})
+			writeControlError(write, envelope.RequestID, err.Error())
 			return
 		}
 		resp := map[string]any{

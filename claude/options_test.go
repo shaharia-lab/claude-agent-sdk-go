@@ -375,3 +375,164 @@ func TestDefaultOptions(t *testing.T) {
 		t.Fatalf("expected default executable 'claude', got %s", opts.ClaudeExecutable)
 	}
 }
+
+// ─── Permission prompt routing (#17) ─────────────────────────────────────────
+
+func allowAllHandler(string, json.RawMessage, PermissionContext) PermissionResult {
+	return PermissionResult{Behavior: "allow"}
+}
+
+// A registered handler is what enables the can_use_tool route, via
+// --permission-prompt-tool stdio. Verified against claude 2.1.224, where the
+// flag is accepted (though absent from --help).
+func TestBuildArgs_PermissionHandlerEnablesStdioRoute(t *testing.T) {
+	opts := defaultOptions()
+	opts.PermissionHandler = allowAllHandler
+
+	args := opts.buildArgs()
+
+	if !containsFlag(args, "--permission-prompt-tool", "stdio") {
+		t.Fatalf("expected --permission-prompt-tool stdio, got %v", args)
+	}
+}
+
+func TestBuildArgs_NoHandlerNoPromptToolFlag(t *testing.T) {
+	args := defaultOptions().buildArgs()
+
+	if slices.Contains(args, "--permission-prompt-tool") {
+		t.Fatalf("expected no --permission-prompt-tool without a handler, got %v", args)
+	}
+}
+
+// The old --permission-prompt-tool-name does not exist: claude 2.1.224 rejects
+// it outright with "error: unknown option", killing the session at startup.
+func TestBuildArgs_NeverEmitsNonexistentPromptToolNameFlag(t *testing.T) {
+	opts := defaultOptions()
+	opts.PermissionPromptToolName = "mcp__x__y"
+
+	args := opts.buildArgs()
+
+	if slices.Contains(args, "--permission-prompt-tool-name") {
+		t.Fatal("--permission-prompt-tool-name does not exist in the CLI and must never be emitted")
+	}
+	if !containsFlag(args, "--permission-prompt-tool", "mcp__x__y") {
+		t.Fatalf("expected --permission-prompt-tool mcp__x__y, got %v", args)
+	}
+}
+
+func TestValidate_HandlerAndPromptToolNameConflict(t *testing.T) {
+	opts := defaultOptions()
+	opts.PermissionHandler = allowAllHandler
+	opts.PermissionPromptToolName = "mcp__x__y"
+
+	err := opts.validate()
+	if err == nil {
+		t.Fatal("expected an error when both a handler and a prompt tool name are set")
+	}
+	// The message must name both options so the caller knows what to remove.
+	for _, want := range []string{"WithPermissionHandler", "WithPermissionPromptToolName"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error should name %s, got: %v", want, err)
+		}
+	}
+}
+
+func TestValidate_EitherAloneIsFine(t *testing.T) {
+	withHandler := defaultOptions()
+	withHandler.PermissionHandler = allowAllHandler
+	if err := withHandler.validate(); err != nil {
+		t.Fatalf("handler alone should be valid, got %v", err)
+	}
+
+	withName := defaultOptions()
+	withName.PermissionPromptToolName = "mcp__x__y"
+	if err := withName.validate(); err != nil {
+		t.Fatalf("prompt tool name alone should be valid, got %v", err)
+	}
+}
+
+// The SDK defaults to bypassPermissions, so a handler is shadowed out of the
+// box until #26 changes that — the warning is what stops a caller believing
+// their policy is enforced when it never runs.
+func TestWarnPermissionHandlerShadowed(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*Options)
+		wantWarn  bool
+		wantText  string
+	}{
+		{
+			name: "bypassPermissions shadows the handler",
+			configure: func(o *Options) {
+				o.PermissionMode = PermissionModeBypassPermissions
+			},
+			wantWarn: true,
+			wantText: "bypassPermissions",
+		},
+		{
+			name: "AllowedTools shadows the handler",
+			configure: func(o *Options) {
+				o.PermissionMode = PermissionModeDefault
+				o.AllowDangerouslySkipPermissions = false
+				o.AllowedTools = []string{"Bash", "Read"}
+			},
+			wantWarn: true,
+			wantText: "Bash, Read",
+		},
+		{
+			name: "AllowDangerouslySkipPermissions shadows the handler",
+			configure: func(o *Options) {
+				o.PermissionMode = PermissionModeDefault
+				o.AllowDangerouslySkipPermissions = true
+			},
+			wantWarn: true,
+			wantText: "AllowDangerouslySkipPermissions",
+		},
+		{
+			name: "nothing shadows the handler",
+			configure: func(o *Options) {
+				o.PermissionMode = PermissionModeDefault
+				o.AllowDangerouslySkipPermissions = false
+			},
+			wantWarn: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var warnings []string
+			opts := defaultOptions()
+			opts.PermissionHandler = allowAllHandler
+			opts.Stderr = func(line string) { warnings = append(warnings, line) }
+			tc.configure(opts)
+
+			warnPermissionHandlerShadowed(opts)
+
+			if !tc.wantWarn {
+				if len(warnings) != 0 {
+					t.Fatalf("expected no warning, got %v", warnings)
+				}
+				return
+			}
+			if len(warnings) != 1 {
+				t.Fatalf("expected exactly 1 warning, got %v", warnings)
+			}
+			if !strings.Contains(warnings[0], tc.wantText) {
+				t.Fatalf("warning should mention %q, got %q", tc.wantText, warnings[0])
+			}
+		})
+	}
+}
+
+// No handler means nothing can be shadowed — never warn.
+func TestWarnPermissionHandlerShadowed_NoHandler(t *testing.T) {
+	var warnings []string
+	opts := defaultOptions()
+	opts.Stderr = func(line string) { warnings = append(warnings, line) }
+
+	warnPermissionHandlerShadowed(opts)
+
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warning without a handler, got %v", warnings)
+	}
+}
