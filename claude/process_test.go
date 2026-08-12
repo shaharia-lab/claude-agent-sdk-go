@@ -172,82 +172,194 @@ func TestInitializeMsg_PromptSuggestions(t *testing.T) {
 	}
 }
 
-func TestRouteControlResponse_MalformedResponse(t *testing.T) {
-	s := &Stream{
-		events:  make(chan Event, 1),
-		pending: make(map[string]chan controlResponse),
-	}
-
-	reqID := "test-req-id"
+// pendingStream returns a Stream with one registered pending request, plus the
+// channel routeControlResponse is expected to resolve.
+func pendingStream(reqID string) (*Stream, chan controlResponse) {
 	ch := make(chan controlResponse, 1)
-	s.pending[reqID] = ch
+	return &Stream{
+		events:  make(chan Event, 1),
+		pending: map[string]chan controlResponse{reqID: ch},
+	}, ch
+}
 
-	// Send a control_response with invalid JSON in the response field.
-	line := []byte(fmt.Sprintf(`{"type":"control_response","request_id":"%s","response":"not-json-object"}`, reqID))
-	routeControlResponse(line, s)
-
-	resp := <-ch
-	if resp.Success {
-		t.Fatal("expected failure for malformed response")
+// routeFixture feeds a control_response captured from a real CLI through the
+// router. See testdata/README.md for how each was captured.
+func routeFixture(t *testing.T, name, reqID string) (*Stream, chan controlResponse) {
+	t.Helper()
+	line, err := os.ReadFile("testdata/" + name)
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
 	}
-	if !strings.Contains(resp.Error, "malformed control_response") {
-		t.Fatalf("expected malformed error message, got %q", resp.Error)
+	s, ch := pendingStream(reqID)
+	routeControlResponse(line, s)
+	return s, ch
+}
+
+// mustResolve returns the response routeControlResponse delivered, failing if
+// it delivered none. routeControlResponse sends before it returns, so a
+// non-blocking receive is deterministic here — and it makes the "nothing was
+// routed" regression fail immediately instead of hanging until the test
+// binary's timeout, which is exactly how this bug hid.
+func mustResolve(t *testing.T, ch chan controlResponse) controlResponse {
+	t.Helper()
+	select {
+	case resp := <-ch:
+		return resp
+	default:
+		t.Fatal("no control response was routed to the waiting caller")
+		return controlResponse{}
 	}
 }
 
-func TestRouteControlResponse_Success(t *testing.T) {
-	s := &Stream{
-		events:  make(chan Event, 1),
-		pending: make(map[string]chan controlResponse),
-	}
+// The CLI nests request_id inside the response object. A response carrying one
+// only at the top level — the shape this SDK wrongly assumed until #36, and
+// which the previous fixtures encoded — must resolve nothing at all.
+func TestRouteControlResponse_TopLevelRequestIDIsNotRouted(t *testing.T) {
+	s, ch := pendingStream("test-req-id")
 
-	reqID := "test-req-id-2"
-	ch := make(chan controlResponse, 1)
-	s.pending[reqID] = ch
-
-	line := []byte(fmt.Sprintf(`{"type":"control_response","request_id":"%s","response":{"subtype":"success","data":"value"}}`, reqID))
+	line := []byte(`{"type":"control_response","request_id":"test-req-id","response":{"subtype":"success","data":"value"}}`)
 	routeControlResponse(line, s)
 
-	resp := <-ch
+	select {
+	case resp := <-ch:
+		t.Fatalf("top-level request_id must not resolve a caller, got %+v", resp)
+	default:
+	}
+	if _, still := s.pending["test-req-id"]; !still {
+		t.Fatal("pending request was consumed by an unroutable response")
+	}
+}
+
+// A real set_permission_mode success: routed by response.request_id, and the
+// caller receives the INNERMOST response payload, not the wrapper.
+func TestRouteControlResponse_SuccessWithPayload(t *testing.T) {
+	_, ch := routeFixture(t, "control_response_set_permission_mode_success.json", "cap-perm")
+
+	resp := mustResolve(t, ch)
 	if !resp.Success {
 		t.Fatalf("expected success, got error: %s", resp.Error)
 	}
-	if resp.Body == nil {
-		t.Fatal("expected Body to be non-nil")
+
+	var body map[string]any
+	if err := json.Unmarshal(resp.Body, &body); err != nil {
+		t.Fatalf("unmarshal body: %v (body=%s)", err, resp.Body)
+	}
+	if body["mode"] != "default" {
+		t.Fatalf("expected the inner payload {\"mode\":\"default\"}, got %s", resp.Body)
+	}
+	if _, leaked := body["subtype"]; leaked {
+		t.Fatalf("Body must be the inner payload, not the wrapper: %s", resp.Body)
+	}
+	if _, leaked := body["request_id"]; leaked {
+		t.Fatalf("Body must be the inner payload, not the wrapper: %s", resp.Body)
 	}
 }
 
-func TestRouteControlResponse_Error(t *testing.T) {
-	s := &Stream{
-		events:  make(chan Event, 1),
-		pending: make(map[string]chan controlResponse),
+// A real set_model success carries no payload at all. An absent inner response
+// is success-without-data, never an error.
+func TestRouteControlResponse_SuccessWithoutPayload(t *testing.T) {
+	_, ch := routeFixture(t, "control_response_set_model_success.json", "cap-model")
+
+	resp := mustResolve(t, ch)
+	if !resp.Success {
+		t.Fatalf("a payload-less reply is still a success, got error: %s", resp.Error)
 	}
+	if resp.Body != nil {
+		t.Fatalf("expected nil Body when the CLI sends no payload, got %s", resp.Body)
+	}
+	if resp.Error != "" {
+		t.Fatalf("expected no error, got %q", resp.Error)
+	}
+}
 
-	reqID := "test-req-id-3"
-	ch := make(chan controlResponse, 1)
-	s.pending[reqID] = ch
+// The error variant surfaces the CLI's message verbatim.
+func TestRouteControlResponse_Error(t *testing.T) {
+	_, ch := routeFixture(t, "control_response_error_unsupported_subtype.json", "cap-err")
 
-	line := []byte(fmt.Sprintf(`{"type":"control_response","request_id":"%s","response":{"subtype":"error","error":"something failed"}}`, reqID))
-	routeControlResponse(line, s)
-
-	resp := <-ch
+	resp := mustResolve(t, ch)
 	if resp.Success {
 		t.Fatal("expected failure")
 	}
-	if resp.Error != "something failed" {
-		t.Fatalf("expected error %q, got %q", "something failed", resp.Error)
+	const want = "Unsupported control request subtype: supported_commands"
+	if resp.Error != want {
+		t.Fatalf("expected error %q, got %q", want, resp.Error)
+	}
+	if resp.Body != nil {
+		t.Fatalf("expected nil Body on an error reply, got %s", resp.Body)
 	}
 }
 
-func TestRouteControlResponse_UnknownRequestID(t *testing.T) {
-	s := &Stream{
-		events:  make(chan Event, 1),
-		pending: make(map[string]chan controlResponse),
+// Lines that cannot be correlated to a caller are dropped. Routing is strictly
+// nested-only, so a non-object response has no request_id to route by — there
+// is nobody to hand an error to. It must not panic or disturb the pending map.
+func TestRouteControlResponse_UnroutableIsDropped(t *testing.T) {
+	cases := []struct {
+		name string
+		line string
+	}{
+		{"response is not an object", `{"type":"control_response","response":"not-json-object"}`},
+		{"no request_id anywhere", `{"type":"control_response","response":{"subtype":"success"}}`},
+		{"response absent", `{"type":"control_response"}`},
+		{"not json at all", `{"type":"control_response",`},
 	}
 
-	// No pending request registered for this ID — should not panic.
-	line := []byte(`{"type":"control_response","request_id":"unknown","response":{"subtype":"success"}}`)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s, ch := pendingStream("test-req-id")
+
+			routeControlResponse([]byte(tc.line), s) // must not panic
+
+			select {
+			case resp := <-ch:
+				t.Fatalf("unroutable line resolved a caller: %+v", resp)
+			default:
+			}
+			if len(s.pending) != 1 {
+				t.Fatalf("pending map was disturbed: %v", s.pending)
+			}
+		})
+	}
+}
+
+// A well-formed reply for a request nobody is waiting on is a no-op.
+func TestRouteControlResponse_UnknownRequestID(t *testing.T) {
+	s, ch := pendingStream("test-req-id")
+
+	line := []byte(`{"type":"control_response","response":{"subtype":"success","request_id":"someone-else"}}`)
 	routeControlResponse(line, s) // should not panic
+
+	select {
+	case resp := <-ch:
+		t.Fatalf("resolved the wrong caller: %+v", resp)
+	default:
+	}
+}
+
+// Only the addressed caller is resolved when several requests are in flight.
+func TestRouteControlResponse_ResolvesOnlyTheAddressedCaller(t *testing.T) {
+	s, target := pendingStream("cap-perm")
+	other := make(chan controlResponse, 1)
+	s.pending["other-req"] = other
+
+	line, err := os.ReadFile("testdata/control_response_set_permission_mode_success.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+	routeControlResponse(line, s)
+
+	select {
+	case <-target:
+	default:
+		t.Fatal("addressed caller was not resolved")
+	}
+	select {
+	case resp := <-other:
+		t.Fatalf("an unrelated caller was resolved: %+v", resp)
+	default:
+	}
+	if _, still := s.pending["other-req"]; !still {
+		t.Fatal("an unrelated pending request was removed")
+	}
 }
 
 func TestHandleControlRequest_Elicitation_WithHandler(t *testing.T) {

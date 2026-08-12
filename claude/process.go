@@ -418,31 +418,39 @@ func handleControlRequest(line []byte, write func(any) error, opts *Options, hoo
 
 // routeControlResponse routes a control_response message (a reply from claude to
 // one of our set_model / set_permission_mode / etc. requests) to the waiting caller.
+//
+// The wire shape is three levels deep — the correlation id lives inside the
+// response object, NOT at the top level of the envelope:
+//
+//	{"type":"control_response","response":{"subtype":…,"request_id":…,"error":…,"response":{…}}}
+//
+// Matching the reference SDKs (Python _internal/query.py:283-295; TypeScript
+// sdk.mjs reads e.response.request_id), routing is by response.request_id and
+// the value handed to the caller is the *innermost* response payload — not the
+// wrapper that carries subtype/request_id. The CLI omits that payload entirely
+// on replies that carry no data (a real set_model success), in which case Body
+// is nil and the request still succeeded.
+//
+// Routing is strictly nested-only: a line whose response is not an object, or
+// which carries no request_id, cannot be correlated to any caller and is
+// dropped. There is no top-level fallback — the CLI has never emitted one, and
+// inventing a shape here is what broke this in the first place (see #36).
 func routeControlResponse(line []byte, s *Stream) {
 	var envelope struct {
-		Type      string          `json:"type"`
-		RequestID string          `json:"request_id"`
-		Response  json.RawMessage `json:"response"`
+		Response struct {
+			Subtype   string          `json:"subtype"`
+			RequestID string          `json:"request_id"`
+			Error     string          `json:"error,omitempty"`
+			Response  json.RawMessage `json:"response,omitempty"`
+		} `json:"response"`
 	}
 	if err := json.Unmarshal(line, &envelope); err != nil {
 		return
 	}
 
-	reqID := envelope.RequestID
+	reqID := envelope.Response.RequestID
 	if reqID == "" {
 		return
-	}
-
-	// Extract subtype and error from the response body.
-	var respMeta struct {
-		Subtype string `json:"subtype"`
-		Error   string `json:"error,omitempty"`
-	}
-	if err := json.Unmarshal(envelope.Response, &respMeta); err != nil {
-		// Treat unparseable response as an error so callers don't
-		// mistakenly see it as success.
-		respMeta.Subtype = "error"
-		respMeta.Error = fmt.Sprintf("malformed control_response: %v", err)
 	}
 
 	s.pendingMu.Lock()
@@ -455,9 +463,9 @@ func routeControlResponse(line []byte, s *Stream) {
 	if ok {
 		select {
 		case ch <- controlResponse{
-			Success: respMeta.Subtype != "error",
-			Error:   respMeta.Error,
-			Body:    envelope.Response,
+			Success: envelope.Response.Subtype != "error",
+			Error:   envelope.Response.Error,
+			Body:    envelope.Response.Response,
 		}:
 		default:
 		}
