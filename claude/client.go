@@ -16,10 +16,10 @@ import (
 // Control methods (SetModel, SetPermissionMode, SetMaxThinkingTokens, Interrupt)
 // may be called concurrently from any goroutine while the stream is active.
 type Stream struct {
-	events    chan Event
-	write     func(any) error
-	ctx       context.Context
-	interrupt func() // graceful shutdown trigger (idempotent)
+	events   chan Event
+	write    func(any) error
+	ctx      context.Context
+	shutdown func() // graceful shutdown trigger (idempotent); Close only, never Interrupt
 
 	// pending maps request_id → response channel for blocking control requests.
 	pending   map[string]chan controlResponse
@@ -55,18 +55,79 @@ func (s *Stream) SetMaxThinkingTokens(n int) error {
 	})
 }
 
-// Interrupt initiates graceful shutdown of the session: stdin is closed and
-// SIGTERM is sent to the claude subprocess. If the process does not exit within
-// 5 seconds, SIGKILL is sent. Interrupt is idempotent.
-func (s *Stream) Interrupt() error {
-	s.interrupt()
-	return nil
+// InterruptReceipt is the result of an interrupt operation.
+//
+// The CLI advertises it through the interrupt_receipt_v1 capability on
+// system/init; CLIs without that capability reply to an interrupt with an empty
+// success and no receipt at all, which is reported as a nil *InterruptReceipt
+// rather than an error.
+type InterruptReceipt struct {
+	// StillQueued holds the uuids of async user messages that survived the
+	// interrupt and remain queued for a subsequent turn. It is empty when
+	// nothing survived.
+	StillQueued []string `json:"still_queued"`
 }
 
-// Close gracefully shuts down the stream. It is equivalent to Interrupt and is
-// idempotent. Provided as a more semantically appropriate name when using Session.
+// decodeInterruptReceipt extracts the receipt from an interrupt control_response
+// body. Decoding is deliberately lenient: an interrupt that the CLI acknowledged
+// has succeeded regardless of what the payload looks like, so anything absent,
+// null, unparseable, or of an unexpected type yields a nil receipt instead of an
+// error. Only a well-formed still_queued array produces one, matching the
+// reference implementation, which returns a receipt solely when still_queued is
+// an array and keeps just its string elements.
+func decodeInterruptReceipt(body json.RawMessage) *InterruptReceipt {
+	if len(body) == 0 {
+		return nil
+	}
+	var payload struct {
+		StillQueued []json.RawMessage `json:"still_queued"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil || payload.StillQueued == nil {
+		return nil
+	}
+	queued := make([]string, 0, len(payload.StillQueued))
+	for _, raw := range payload.StillQueued {
+		// Decode into any and type-assert rather than unmarshalling straight
+		// into a string: JSON null unmarshals into a string as a no-op, which
+		// would smuggle in an empty id. This mirrors the reference's
+		// `typeof r === "string"` filter.
+		var v any
+		if err := json.Unmarshal(raw, &v); err != nil {
+			continue
+		}
+		if id, ok := v.(string); ok {
+			queued = append(queued, id)
+		}
+	}
+	return &InterruptReceipt{StillQueued: queued}
+}
+
+// Interrupt aborts the turn currently in progress and leaves the session alive:
+// it sends an interrupt control request and blocks until the CLI acknowledges
+// it. The subprocess keeps running, Events stays open, and the next
+// SendUserMessage (or Session.Send) starts a new turn on the same conversation.
+//
+// To terminate the session instead, call Close.
+//
+// The returned receipt lists async user messages that survived the interrupt and
+// are still queued. It is nil when the CLI sends no receipt — older CLIs reply
+// with an empty success, and only those advertising the interrupt_receipt_v1
+// capability populate it. A missing receipt is not an error.
+func (s *Stream) Interrupt() (*InterruptReceipt, error) {
+	body, err := s.sendControlRequestWithResponse("interrupt", nil)
+	if err != nil {
+		return nil, err
+	}
+	return decodeInterruptReceipt(body), nil
+}
+
+// Close terminates the session: stdin is closed and SIGTERM is sent to the
+// claude subprocess. If the process does not exit within 5 seconds, SIGKILL is
+// sent. Close is idempotent and closes the Events channel.
+//
+// To abort the current turn while keeping the session usable, call Interrupt.
 func (s *Stream) Close() error {
-	s.interrupt()
+	s.shutdown()
 	return nil
 }
 
