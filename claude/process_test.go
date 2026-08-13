@@ -147,7 +147,7 @@ func TestInitializeMsg_PromptSuggestions(t *testing.T) {
 			opts := defaultOptions()
 			opts.PromptSuggestions = tt.enabled
 
-			msg := initializeMsg(opts, map[string]any{})
+			msg := initializeMsg("test-init-req", opts, map[string]any{})
 
 			// Marshal and re-parse to inspect the structure.
 			b, err := json.Marshal(msg)
@@ -650,7 +650,7 @@ func TestInitializeMsg_NeverSendsSdkMcpServers(t *testing.T) {
 			opts := defaultOptions()
 			opts.McpServers = tc.servers
 
-			b, err := json.Marshal(initializeMsg(opts, map[string]any{}))
+			b, err := json.Marshal(initializeMsg("test-init-req", opts, map[string]any{}))
 			if err != nil {
 				t.Fatalf("marshal: %v", err)
 			}
@@ -698,7 +698,7 @@ func TestInitializeMsg_MatchesCapturedCLIContract(t *testing.T) {
 	opts.McpServers = map[string]any{
 		"time-server": McpHTTPServer{Type: "http", URL: "http://127.0.0.1:1234"},
 	}
-	b, err := json.Marshal(initializeMsg(opts, map[string]any{}))
+	b, err := json.Marshal(initializeMsg("test-init-req", opts, map[string]any{}))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}

@@ -92,21 +92,11 @@ func spawnAndStream(ctx context.Context, opts *Options, prompt string) (*Stream,
 	// Build hooks config and registry from options.
 	hooksConfig, hookReg := buildHooksForInitialize(opts.Hooks)
 
-	// Send the initialize message. System prompt, MCP servers, agents, and hooks
-	// are passed here (not as CLI flags) so they work in bidirectional mode.
-	if err := write(initializeMsg(opts, hooksConfig)); err != nil {
-		_ = cmd.Process.Kill()
-		return nil, fmt.Errorf("claude: initialize: %w", err)
-	}
-
-	// Send the user message (the prompt), unless we're in session mode
-	// (the caller will send the first message via Session.Send).
-	if !opts.sessionMode && prompt != "" {
-		if err := write(userMsg(prompt)); err != nil {
-			_ = cmd.Process.Kill()
-			return nil, fmt.Errorf("claude: user message: %w", err)
-		}
-	}
+	// The initialize handshake is written and awaited AFTER the Stream and its
+	// reader goroutine exist (further down): the response can only be routed
+	// once stream.pending is live and something is reading stdout. The user
+	// message then follows the acknowledgement, so MCP servers, agents and hooks
+	// are configured before the first turn starts (#19).
 
 	// Create the Stream struct. The goroutines below close over it.
 	stream := &Stream{
@@ -201,6 +191,19 @@ func spawnAndStream(ctx context.Context, opts *Options, prompt string) (*Stream,
 				continue // skip malformed lines
 			}
 
+			// The CLI advertises its protocol capabilities on system/init, not
+			// in the initialize control response, so they are captured here as
+			// the event flows past (#19).
+			if event.Type == TypeSystem {
+				var sysInit struct {
+					Subtype      string   `json:"subtype"`
+					Capabilities []string `json:"capabilities"`
+				}
+				if json.Unmarshal(line, &sysInit) == nil && sysInit.Subtype == "init" {
+					stream.setCapabilities(sysInit.Capabilities)
+				}
+			}
+
 			select {
 			case stream.events <- event:
 			case <-ctx.Done():
@@ -244,6 +247,52 @@ func spawnAndStream(ctx context.Context, opts *Options, prompt string) (*Stream,
 			}
 		}
 	}()
+
+	// ── initialize handshake ────────────────────────────────────────────────
+	// The reader goroutine is now live, so a control_response can be routed.
+	// Register the request id BEFORE writing, await the acknowledgement, and
+	// cache the payload — it is the SDK's only source of truth for the CLI's
+	// models, commands, agents and account (#19).
+	initReqID := newUUID()
+	initCh := make(chan controlResponse, 1)
+	stream.pendingMu.Lock()
+	stream.pending[initReqID] = initCh
+	stream.pendingMu.Unlock()
+
+	if err := write(initializeMsg(initReqID, opts, hooksConfig)); err != nil {
+		stream.shutdown()
+		return nil, fmt.Errorf("claude: initialize: %w", err)
+	}
+
+	select {
+	case resp := <-initCh:
+		if !resp.Success {
+			stream.shutdown()
+			return nil, &InitializeError{Message: resp.Error}
+		}
+		stream.initResp = decodeInitializeResponse(resp.Body)
+
+	case <-time.After(opts.initTimeout()):
+		stream.shutdown()
+		return nil, &InitializeError{
+			Message: fmt.Sprintf("the CLI did not acknowledge initialize within %s", opts.initTimeout()),
+			Timeout: true,
+		}
+
+	case <-ctx.Done():
+		stream.shutdown()
+		return nil, ctx.Err()
+	}
+
+	// Only now is it safe to start a turn: MCP servers, agents and hooks
+	// declared in the initialize message are configured. Session mode sends its
+	// first message via Session.Send instead.
+	if !opts.sessionMode && prompt != "" {
+		if err := write(userMsg(prompt)); err != nil {
+			stream.shutdown()
+			return nil, fmt.Errorf("claude: user message: %w", err)
+		}
+	}
 
 	return stream, nil
 }
@@ -480,7 +529,7 @@ func routeControlResponse(line []byte, s *Stream) {
 // initializeMsg builds the control_request initialize message sent to stdin at
 // session start. This is how system prompt, MCP servers, agents, hooks, and
 // output format are passed in bidirectional mode, matching the TS SDK behaviour.
-func initializeMsg(opts *Options, hooksConfig map[string]any) any {
+func initializeMsg(reqID string, opts *Options, hooksConfig map[string]any) any {
 	agents := any(map[string]any{})
 	if len(opts.Agents) > 0 {
 		m := make(map[string]any, len(opts.Agents))
@@ -537,7 +586,7 @@ func initializeMsg(opts *Options, hooksConfig map[string]any) any {
 
 	return map[string]any{
 		"type":       "control_request",
-		"request_id": newUUID(),
+		"request_id": reqID,
 		"request":    req,
 	}
 }
