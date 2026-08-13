@@ -115,6 +115,35 @@ r2, err := claude.Run(ctx, "What is my name?",
 )
 ```
 
+### Stopping a turn vs ending a session
+
+`Interrupt()` and `Close()` are different operations:
+
+| | what it does | session after |
+| --- | --- | --- |
+| `Interrupt()` | aborts the turn in progress via an interrupt control request | **alive** — call `Send` for the next turn |
+| `Close()` | closes stdin, SIGTERM, SIGKILL after 5s | terminated, `Events()` closed |
+
+```go
+sess, err := claude.NewSession(ctx, opts...)
+defer sess.Close()
+
+// ... a turn is running and the user hits "stop" ...
+receipt, err := sess.Interrupt()   // aborts the turn, keeps the conversation
+if receipt != nil {
+    // async user messages that survived and are still queued
+    fmt.Println(receipt.StillQueued)
+}
+
+// the session is still usable
+if err := sess.Send("Never mind — summarise what you had so far."); err != nil {
+    log.Fatal(err)
+}
+```
+
+`receipt` is `nil` when the CLI does not send one (only CLIs advertising the
+`interrupt_receipt_v1` capability do); that is not an error.
+
 ### Custom system prompt
 
 ```go

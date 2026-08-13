@@ -57,7 +57,9 @@ func (s *Session) Events() <-chan Event {
 	return s.stream.Events()
 }
 
-// Close gracefully shuts down the session.
+// Close terminates the session and its subprocess. It is idempotent.
+//
+// To abort the current turn while keeping the session usable, call Interrupt.
 func (s *Session) Close() error {
 	return s.stream.Close()
 }
@@ -118,5 +120,9 @@ func (s *Session) SetMcpServers(servers map[string]any) error {
 	return s.stream.SetMcpServers(servers)
 }
 
-// Interrupt initiates graceful shutdown. Equivalent to Close.
-func (s *Session) Interrupt() error { return s.stream.Interrupt() }
+// Interrupt aborts the turn currently in progress; the session stays open, so
+// call Send to start the next turn. The returned receipt lists async user
+// messages that survived the interrupt, and is nil when the CLI sends none.
+//
+// To end the session entirely, call Close.
+func (s *Session) Interrupt() (*InterruptReceipt, error) { return s.stream.Interrupt() }

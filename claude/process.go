@@ -31,7 +31,7 @@ type controlResponse struct {
 // user message. claude's responses stream on stdout as JSON lines.
 //
 // Graceful shutdown (mirrors TS SDK close() behaviour):
-//   - On ctx cancellation or Stream.Interrupt(): stdin is closed, SIGTERM is sent.
+//   - On ctx cancellation or Stream.Close(): stdin is closed, SIGTERM is sent.
 //   - If the process has not exited after 5 s: SIGKILL is sent.
 //
 // The Stream.Events() channel is closed when a TypeResult message is received,
@@ -116,11 +116,14 @@ func spawnAndStream(ctx context.Context, opts *Options, prompt string) (*Stream,
 		pending: make(map[string]chan controlResponse),
 	}
 
-	// interruptOnce / interruptCh enable Stream.Interrupt() to trigger graceful shutdown.
-	var interruptOnce sync.Once
-	interruptCh := make(chan struct{})
-	stream.interrupt = func() {
-		interruptOnce.Do(func() { close(interruptCh) })
+	// shutdownOnce / shutdownCh enable Stream.Close() (and ctx cancellation) to
+	// trigger graceful shutdown. This is deliberately NOT reachable from
+	// Stream.Interrupt, which aborts the turn via a control request and leaves
+	// the subprocess running — see Stream.Interrupt in client.go (#18).
+	var shutdownOnce sync.Once
+	shutdownCh := make(chan struct{})
+	stream.shutdown = func() {
+		shutdownOnce.Do(func() { close(shutdownCh) })
 	}
 
 	// closeStdin closes the subprocess stdin (used on graceful shutdown).
@@ -140,8 +143,8 @@ func spawnAndStream(ctx context.Context, opts *Options, prompt string) (*Stream,
 	go func() {
 		select {
 		case <-ctx.Done():
-			stream.interrupt() // normalise to interruptCh
-		case <-interruptCh:
+			stream.shutdown() // normalise to shutdownCh
+		case <-shutdownCh:
 		case <-procDone:
 			return
 		}
@@ -225,13 +228,13 @@ func spawnAndStream(ctx context.Context, opts *Options, prompt string) (*Stream,
 		if err := cmd.Wait(); err != nil && !gotResult {
 			// In session mode suppress the error when Close()/Interrupt() was called
 			// (expected shutdown) or the context was cancelled.
-			interrupted := false
+			shuttingDown := false
 			select {
-			case <-interruptCh:
-				interrupted = true
+			case <-shutdownCh:
+				shuttingDown = true
 			default:
 			}
-			if !interrupted && ctx.Err() == nil {
+			if !shuttingDown && ctx.Err() == nil {
 				stderr := strings.TrimSpace(stderrBuf.String())
 				msg := err.Error()
 				if stderr != "" {
