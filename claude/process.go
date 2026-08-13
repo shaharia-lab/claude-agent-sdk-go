@@ -703,6 +703,14 @@ func parseLine(line []byte) (Event, error) {
 		var m AssistantMessage
 		event.DecodeErr = json.Unmarshal(line, &m)
 		event.Assistant = &m
+	case TypeUser:
+		// The user side is half of every conversation: the CLI reports each
+		// tool's output as a user turn of tool_result blocks. Without this case
+		// tool results, replayed input and stored transcripts were reachable only
+		// through Raw (#27).
+		var m UserMessage
+		event.DecodeErr = json.Unmarshal(line, &m)
+		event.User = &m
 	case TypeStreamEvent:
 		var m StreamEventMessage
 		event.DecodeErr = json.Unmarshal(line, &m)

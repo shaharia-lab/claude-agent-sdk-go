@@ -1,0 +1,19 @@
+{
+  "type": "user",
+  "message": {
+    "role": "user",
+    "content": [
+      {
+        "type": "tool_result",
+        "content": "File does not exist. Note: your current working directory is /tmp/tmp.NsrBEGBoew.",
+        "is_error": true,
+        "tool_use_id": "toolu_01KvZqe3Gv7Vtgz2awtbNZ7W"
+      }
+    ]
+  },
+  "parent_tool_use_id": null,
+  "session_id": "772c36fd-c68e-4938-bf51-29a3a3387f1d",
+  "uuid": "11c8ad39-6dbe-42e6-a1c0-5498d4224b55",
+  "timestamp": "2026-08-13T12:41:37.451Z",
+  "tool_use_result": "Error: File does not exist. Note: your current working directory is /tmp/tmp.NsrBEGBoew."
+}

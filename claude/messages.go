@@ -4,7 +4,10 @@
 // of @anthropic-ai/claude-agent-sdk.
 package claude
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+)
 
 // MessageType is the discriminant field present on every message.
 type MessageType string
@@ -12,6 +15,9 @@ type MessageType string
 const (
 	// TypeAssistant is a complete assistant turn (SDKAssistantMessage).
 	TypeAssistant MessageType = "assistant"
+	// TypeUser is a turn on the user side (SDKUserMessage) — most often the
+	// CLI delivering a tool's result, not something a human typed.
+	TypeUser MessageType = "user"
 	// TypeStreamEvent carries incremental streaming deltas (SDKPartialAssistantMessage).
 	TypeStreamEvent MessageType = "stream_event"
 	// TypeResult is the final message emitted when the agent finishes (SDKResultMessage).
@@ -74,20 +80,174 @@ const (
 
 // ─── Content blocks ────────────────────────────────────────────────────────────
 
-// ContentBlock is one element of an assistant message's content array.
-// Type is always set; Text and Thinking are populated based on Type.
+// Content block types. These are the values of ContentBlock.Type observed on the
+// wire or found in the CLI binary; anything else still decodes with Type + Raw.
+const (
+	BlockText           = "text"
+	BlockThinking       = "thinking"
+	BlockToolUse        = "tool_use"
+	BlockToolResult     = "tool_result"
+	BlockServerToolUse  = "server_tool_use"
+	BlockAdvisorToolRes = "advisor_tool_result"
+
+	// Server-side tool results are per-tool block types rather than one generic
+	// shape. All of them carry tool_use_id + content, so ContentBlock decodes
+	// them uniformly.
+	BlockWebSearchToolResult     = "web_search_tool_result"
+	BlockCodeExecutionToolResult = "code_execution_tool_result"
+)
+
+// ContentBlock is one element of a message's content array.
+//
+// The wire carries a discriminated union: `text`, `thinking`, `tool_use`,
+// `tool_result`, the server-side tool blocks above, and whatever the API adds
+// next. This is modelled as one struct with a Type discriminator and the
+// superset of fields rather than a Go interface, so a []ContentBlock decodes in
+// a single pass and an unknown block degrades to Type + Raw instead of being
+// dropped.
+//
+// Read only the fields that belong to Type; each is documented with the types
+// that populate it. Raw is always the authoritative payload.
 type ContentBlock struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	Thinking string `json:"thinking,omitempty"`
+	Type string `json:"type"`
+
+	// Text is set when Type == BlockText.
+	Text string `json:"text,omitempty"`
+
+	// Thinking and Signature are set when Type == BlockThinking. Signature
+	// arrives whole here, and incrementally as a signature_delta while streaming.
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+
+	// ID, Name and Input are set when Type is BlockToolUse or BlockServerToolUse.
+	// Input is the tool's arguments object, kept raw because its schema is the
+	// tool's own.
+	ID    string          `json:"id,omitempty"`
+	Name  string          `json:"name,omitempty"`
+	Input json.RawMessage `json:"input,omitempty"`
+
+	// Caller describes how the tool was invoked, e.g. {"type":"direct"}. Sent
+	// alongside every tool_use block by CLI 2.1.224.
+	Caller json.RawMessage `json:"caller,omitempty"`
+
+	// ToolUseID, Content and IsError are set on the result blocks
+	// (BlockToolResult and the server-side variants). ToolUseID pairs the result
+	// back to the ID of the tool_use block that requested it.
+	//
+	// Content is raw because the CLI sends either a plain string or an array of
+	// blocks depending on the tool — both shapes were observed in one session.
+	ToolUseID string          `json:"tool_use_id,omitempty"`
+	Content   json.RawMessage `json:"content,omitempty"`
+	IsError   *bool           `json:"is_error,omitempty"`
+
+	// Raw is the complete block as received, including fields this struct does
+	// not model. Always populated.
+	Raw json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON records the verbatim block in Raw before decoding the known
+// fields, so an unknown or partially-decodable block still carries its payload.
+func (b *ContentBlock) UnmarshalJSON(data []byte) error {
+	b.Raw = append(b.Raw[:0], data...)
+
+	// A distinct type avoids recursing into this method.
+	type blockFields ContentBlock
+	return json.Unmarshal(data, (*blockFields)(b))
+}
+
+// ContentText returns the block's Content as a plain string when the CLI sent
+// one. Result blocks carry either a string or an array of blocks; ok is false
+// for the array form, where Content should be decoded by the caller.
+func (b *ContentBlock) ContentText() (string, bool) {
+	var s string
+	if err := json.Unmarshal(b.Content, &s); err != nil {
+		return "", false
+	}
+	return s, true
+}
+
+// Failed reports whether this is a result block the tool reported as an error.
+func (b *ContentBlock) Failed() bool { return b.IsError != nil && *b.IsError }
+
+// ContentBlocks is a message's content array.
+//
+// The CLI sends content either as an array of blocks (every message it
+// originates) or as a bare string (the shape this SDK itself sends for a user
+// turn, and what stored transcripts replay). A string decodes to a single text
+// block so callers have one shape to handle.
+type ContentBlocks []ContentBlock
+
+// UnmarshalJSON accepts both the array and the bare-string form.
+func (c *ContentBlocks) UnmarshalJSON(data []byte) error {
+	// Check for null first: Go unmarshals JSON null into a string as a no-op,
+	// so the string branch below would silently turn absent content into one
+	// empty text block rather than no content at all.
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		*c = nil
+		return nil
+	}
+
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*c = ContentBlocks{{Type: BlockText, Text: s, Raw: append(json.RawMessage(nil), data...)}}
+		return nil
+	}
+
+	type blocks ContentBlocks
+	return json.Unmarshal(data, (*blocks)(c))
 }
 
 // ─── Assistant message ─────────────────────────────────────────────────────────
 
-// MessagePayload is the inner `message` object inside AssistantMessage.
+// AssistantMessageError classifies why an assistant turn failed.
+type AssistantMessageError string
+
+// Assistant error classifications.
+const (
+	ErrAuthenticationFailed AssistantMessageError = "authentication_failed"
+	ErrBillingError         AssistantMessageError = "billing_error"
+	ErrRateLimit            AssistantMessageError = "rate_limit"
+	ErrInvalidRequest       AssistantMessageError = "invalid_request"
+	ErrServerError          AssistantMessageError = "server_error"
+	ErrUnknown              AssistantMessageError = "unknown"
+)
+
+// MessagePayload is the inner `message` object of an assistant or user message.
 type MessagePayload struct {
-	Role    string         `json:"role"`
-	Content []ContentBlock `json:"content"`
+	Role    string        `json:"role"`
+	Content ContentBlocks `json:"content"`
+
+	// ID is the API message id, e.g. "msg_011Cdz…". Assistant messages only.
+	ID string `json:"id,omitempty"`
+	// Type is the API object type; the CLI sends "message".
+	Type string `json:"type,omitempty"`
+	// Model is the model that produced this turn, e.g. "claude-opus-5".
+	Model string `json:"model,omitempty"`
+
+	// StopReason is nil until the turn ends; "tool_use" and "end_turn" are the
+	// common terminal values. StopSequence is set only when a stop sequence
+	// triggered the stop.
+	StopReason   *string         `json:"stop_reason,omitempty"`
+	StopSequence *string         `json:"stop_sequence,omitempty"`
+	StopDetails  json.RawMessage `json:"stop_details,omitempty"`
+
+	// Error classifies a failed turn; empty on success.
+	//
+	// Placement is inferred, not captured: no session available here produced a
+	// failed turn, and the official Python SDK flattens the whole `message`
+	// object onto its own type, so its top-level `error` most likely sits beside
+	// the other fields here. If a future capture proves otherwise this field
+	// stays empty — read Event.Raw when it matters.
+	Error AssistantMessageError `json:"error,omitempty"`
+
+	// Usage is this turn's token counts, kept raw because the CLI nests
+	// provider-specific detail under it (cache_creation, inference_geo, …) that
+	// changes independently of this SDK.
+	//
+	// This is NOT the cost-accounting field: it reports a single turn of the main
+	// loop only. Cumulative per-model usage and cost live in Result.ModelUsages
+	// (wire key modelUsage).
+	Usage json.RawMessage `json:"usage,omitempty"`
 }
 
 // AssistantMessage is emitted when Claude produces a complete response turn.
@@ -98,6 +258,11 @@ type AssistantMessage struct {
 	ParentToolUseID *string        `json:"parent_tool_use_id"`
 	SessionID       string         `json:"session_id"`
 	UUID            string         `json:"uuid"`
+
+	// Timestamp is the CLI's send time, RFC 3339 with milliseconds.
+	Timestamp string `json:"timestamp,omitempty"`
+	// RequestID is the upstream API request id, e.g. "req_011Cdz…".
+	RequestID string `json:"request_id,omitempty"`
 }
 
 // Text returns the concatenated text from all text content blocks.
@@ -115,8 +280,76 @@ func (m *AssistantMessage) Text() string {
 func (m *AssistantMessage) Thinking() string {
 	var out string
 	for _, b := range m.Message.Content {
-		if b.Type == "thinking" {
+		if b.Type == BlockThinking {
 			out += b.Thinking
+		}
+	}
+	return out
+}
+
+// ToolUses returns the tool_use blocks of this turn — the tools the agent is
+// asking to run. Each pairs by ID to a tool_result block on the following
+// UserMessage.
+func (m *AssistantMessage) ToolUses() []ContentBlock {
+	var out []ContentBlock
+	for _, b := range m.Message.Content {
+		if b.Type == BlockToolUse || b.Type == BlockServerToolUse {
+			out = append(out, b)
+		}
+	}
+	return out
+}
+
+// ─── User message ──────────────────────────────────────────────────────────────
+
+// UserMessage is a turn on the user side of the conversation.
+//
+// Most of these are not typed by a human: the CLI emits one after every tool
+// call, carrying the tool's output as tool_result blocks. They also carry
+// replayed input under WithReplayUserMessages and every user turn of a stored
+// transcript. Mirrors SDKUserMessage in the TypeScript SDK.
+type UserMessage struct {
+	Type            MessageType    `json:"type"`
+	Message         MessagePayload `json:"message"`
+	ParentToolUseID *string        `json:"parent_tool_use_id"`
+	SessionID       string         `json:"session_id"`
+	UUID            string         `json:"uuid"`
+
+	// Timestamp is the CLI's send time, RFC 3339 with milliseconds.
+	Timestamp string `json:"timestamp,omitempty"`
+
+	// ToolUseResult is the tool's structured result, alongside the rendered form
+	// in the tool_result block. Raw because its shape is the tool's own: a Read
+	// sends an object with file metadata, a failure sends a plain string.
+	ToolUseResult json.RawMessage `json:"tool_use_result,omitempty"`
+
+	// IsSynthetic marks a message the CLI generated rather than one the user or a
+	// tool produced.
+	IsSynthetic bool `json:"isSynthetic,omitempty"`
+}
+
+// Text returns the concatenated text from all text content blocks. For a user
+// turn sent as a bare string, that is the whole message.
+func (m *UserMessage) Text() string {
+	var out string
+	for _, b := range m.Message.Content {
+		if b.Type == BlockText {
+			out += b.Text
+		}
+	}
+	return out
+}
+
+// ToolResults returns the tool_result blocks of this turn, including the
+// server-side result variants. Pair them to the preceding assistant turn's
+// tool_use blocks by ToolUseID.
+func (m *UserMessage) ToolResults() []ContentBlock {
+	var out []ContentBlock
+	for _, b := range m.Message.Content {
+		switch b.Type {
+		case BlockToolResult, BlockAdvisorToolRes,
+			BlockWebSearchToolResult, BlockCodeExecutionToolResult:
+			out = append(out, b)
 		}
 	}
 	return out
@@ -124,18 +357,141 @@ func (m *AssistantMessage) Thinking() string {
 
 // ─── Stream event message ──────────────────────────────────────────────────────
 
+// Stream event types, the values of StreamEvent.Type.
+const (
+	StreamMessageStart      = "message_start"
+	StreamMessageDelta      = "message_delta"
+	StreamMessageStop       = "message_stop"
+	StreamContentBlockStart = "content_block_start"
+	StreamContentBlockDelta = "content_block_delta"
+	StreamContentBlockStop  = "content_block_stop"
+)
+
+// Delta types, the values of StreamEventDelta.Type.
+const (
+	DeltaText      = "text_delta"
+	DeltaThinking  = "thinking_delta"
+	DeltaInputJSON = "input_json_delta"
+	DeltaSignature = "signature_delta"
+)
+
 // StreamEventDelta is the incremental content of a stream_event delta.
+// Which field carries the increment depends on Type.
 type StreamEventDelta struct {
 	Type     string `json:"type"`
 	Text     string `json:"text,omitempty"`
 	Thinking string `json:"thinking,omitempty"`
+
+	// PartialJSON is a fragment of a tool's input, sent when Type is
+	// DeltaInputJSON. Fragments split at arbitrary points — including mid-token
+	// and mid-string — so they are only valid JSON once concatenated across the
+	// whole block.
+	PartialJSON string `json:"partial_json,omitempty"`
+
+	// Signature is a fragment of a thinking block's signature (DeltaSignature).
+	Signature string `json:"signature,omitempty"`
+
+	// StopReason and StopSequence ride the message_delta at the end of a turn,
+	// where this struct is the event's `delta` rather than a block's.
+	StopReason   *string `json:"stop_reason,omitempty"`
+	StopSequence *string `json:"stop_sequence,omitempty"`
 }
 
 // StreamEvent is the inner `event` object of a StreamEventMessage.
+//
+// Its shape varies by Type, so the fields specific to each are kept raw and
+// reached through the accessors below. Raw holds the whole event verbatim.
 type StreamEvent struct {
 	Type  string            `json:"type"`
 	Delta *StreamEventDelta `json:"delta,omitempty"`
 	Index int               `json:"index,omitempty"`
+
+	// Message is the opening message envelope on StreamMessageStart.
+	Message json.RawMessage `json:"message,omitempty"`
+
+	// ContentBlock is the block being opened on StreamContentBlockStart. For a
+	// tool_use block it already carries id and name, with input arriving as
+	// input_json_delta fragments.
+	ContentBlock json.RawMessage `json:"content_block,omitempty"`
+
+	// Usage rides StreamMessageDelta as a sibling of delta, not inside it.
+	Usage json.RawMessage `json:"usage,omitempty"`
+
+	// ContextManagement reports edits the CLI applied to the context window.
+	ContextManagement json.RawMessage `json:"context_management,omitempty"`
+
+	// Raw is the complete event as received. Always populated.
+	Raw json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON keeps the event verbatim in Raw before decoding known fields,
+// so nothing the CLI sends is lost to this struct's shape.
+func (e *StreamEvent) UnmarshalJSON(data []byte) error {
+	e.Raw = append(e.Raw[:0], data...)
+
+	type eventFields StreamEvent
+	return json.Unmarshal(data, (*eventFields)(e))
+}
+
+// PartialJSON returns the tool-input fragment carried by this event, if it is an
+// input_json_delta. Concatenate the fragments of one block Index in arrival
+// order to rebuild the tool's input.
+func (e *StreamEvent) PartialJSON() (string, bool) {
+	if e.Delta == nil || e.Delta.Type != DeltaInputJSON {
+		return "", false
+	}
+	return e.Delta.PartialJSON, true
+}
+
+// TextDelta returns the text increment carried by this event, if any.
+func (e *StreamEvent) TextDelta() (string, bool) {
+	if e.Delta == nil || e.Delta.Type != DeltaText {
+		return "", false
+	}
+	return e.Delta.Text, true
+}
+
+// ThinkingDelta returns the thinking increment carried by this event, if any.
+func (e *StreamEvent) ThinkingDelta() (string, bool) {
+	if e.Delta == nil || e.Delta.Type != DeltaThinking {
+		return "", false
+	}
+	return e.Delta.Thinking, true
+}
+
+// SignatureDelta returns the thinking-signature fragment carried by this event,
+// if any.
+func (e *StreamEvent) SignatureDelta() (string, bool) {
+	if e.Delta == nil || e.Delta.Type != DeltaSignature {
+		return "", false
+	}
+	return e.Delta.Signature, true
+}
+
+// ContentBlockStart returns the block being opened, when this event is a
+// content_block_start. This is where a streamed tool call announces its id and
+// name, before any of its input has arrived.
+func (e *StreamEvent) ContentBlockStart() (*ContentBlock, bool) {
+	if e.Type != StreamContentBlockStart || len(e.ContentBlock) == 0 {
+		return nil, false
+	}
+	var b ContentBlock
+	if err := json.Unmarshal(e.ContentBlock, &b); err != nil {
+		return nil, false
+	}
+	return &b, true
+}
+
+// MessageDelta returns the tail of a turn: why it stopped and its final usage.
+// stopReason is empty if the CLI sent none.
+func (e *StreamEvent) MessageDelta() (stopReason string, usage json.RawMessage, ok bool) {
+	if e.Type != StreamMessageDelta {
+		return "", nil, false
+	}
+	if e.Delta != nil && e.Delta.StopReason != nil {
+		stopReason = *e.Delta.StopReason
+	}
+	return stopReason, e.Usage, true
 }
 
 // StreamEventMessage carries incremental deltas during a streaming response.
@@ -146,6 +502,9 @@ type StreamEventMessage struct {
 	ParentToolUseID *string     `json:"parent_tool_use_id"`
 	SessionID       string      `json:"session_id"`
 	UUID            string      `json:"uuid"`
+
+	// TTFTMs is the time to first token in milliseconds, sent on message_start.
+	TTFTMs int `json:"ttft_ms,omitempty"`
 }
 
 // ─── Usage ────────────────────────────────────────────────────────────────────
@@ -294,6 +653,7 @@ type TaskMessage struct {
 //
 // Type is always set. The corresponding typed field is non-nil for known types:
 //   - TypeAssistant     → Assistant
+//   - TypeUser          → User
 //   - TypeStreamEvent   → StreamEvent
 //   - TypeResult        → Result
 //   - TypeSystem        → System
@@ -303,6 +663,7 @@ type TaskMessage struct {
 type Event struct {
 	Type         MessageType
 	Assistant    *AssistantMessage
+	User         *UserMessage
 	StreamEvent  *StreamEventMessage
 	Result       *Result
 	System       *SystemMessage

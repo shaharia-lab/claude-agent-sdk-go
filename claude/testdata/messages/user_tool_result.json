@@ -1,0 +1,27 @@
+{
+  "type": "user",
+  "message": {
+    "role": "user",
+    "content": [
+      {
+        "tool_use_id": "toolu_014V681DGmsapzsqS82K773b",
+        "type": "tool_result",
+        "content": "1\thello-from-corpus\n2\t"
+      }
+    ]
+  },
+  "parent_tool_use_id": null,
+  "session_id": "81b6af29-e21c-4471-9f59-8cb31c44ae15",
+  "uuid": "b3b7b38f-2cd8-4eaa-9269-0854fb97f670",
+  "timestamp": "2026-08-13T12:39:17.985Z",
+  "tool_use_result": {
+    "type": "text",
+    "file": {
+      "filePath": "/tmp/tmp.NOCuqGRaKJ/sample.txt",
+      "content": "hello-from-corpus\n",
+      "numLines": 2,
+      "startLine": 1,
+      "totalLines": 2
+    }
+  }
+}
