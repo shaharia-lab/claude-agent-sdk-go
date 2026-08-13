@@ -2,7 +2,6 @@ package claude
 
 import (
 	"context"
-	"encoding/json"
 )
 
 // Session maintains a persistent Claude subprocess for multi-turn conversations.
@@ -80,24 +79,30 @@ func (s *Session) RewindFiles(userMessageID string) error {
 	return s.stream.RewindFiles(userMessageID)
 }
 
-// SupportedModels queries the CLI for the list of supported models.
-func (s *Session) SupportedModels() (json.RawMessage, error) {
-	return s.stream.SupportedModels()
-}
+// SupportedModels returns the models the connected CLI offers, from the
+// initialize handshake. No I/O; safe to call concurrently.
+func (s *Session) SupportedModels() []ModelInfo { return s.stream.SupportedModels() }
 
-// SupportedCommands queries the CLI for the list of supported commands.
-func (s *Session) SupportedCommands() (json.RawMessage, error) {
-	return s.stream.SupportedCommands()
-}
+// SupportedCommands returns the slash commands available in this session, from
+// the initialize handshake. No I/O; safe to call concurrently.
+func (s *Session) SupportedCommands() []SlashCommand { return s.stream.SupportedCommands() }
 
-// SupportedAgents queries the CLI for the list of supported agents.
-func (s *Session) SupportedAgents() (json.RawMessage, error) {
-	return s.stream.SupportedAgents()
-}
+// SupportedAgents returns the subagent types this session can dispatch to, from
+// the initialize handshake. No I/O; safe to call concurrently.
+func (s *Session) SupportedAgents() []AgentInfo { return s.stream.SupportedAgents() }
 
-// AccountInfo queries the CLI for the current account information.
-func (s *Session) AccountInfo() (json.RawMessage, error) {
-	return s.stream.AccountInfo()
+// AccountInfo returns the account the CLI is authenticated as, from the
+// initialize handshake. No I/O; safe to call concurrently.
+func (s *Session) AccountInfo() AccountInfo { return s.stream.AccountInfo() }
+
+// Capabilities returns the protocol capabilities the CLI advertises. These come
+// from the system/init event rather than the initialize handshake, so the list
+// is empty until the first turn has started — see Stream.Capabilities.
+func (s *Session) Capabilities() []string { return s.stream.Capabilities() }
+
+// OutputStyle returns the session's output style and the styles available.
+func (s *Session) OutputStyle() (style string, available []string) {
+	return s.stream.OutputStyle()
 }
 
 // StopTask asks the CLI to stop a running background task.

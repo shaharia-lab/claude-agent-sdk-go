@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // ThinkingMode controls Claude's extended thinking behaviour.
@@ -422,6 +424,10 @@ type Options struct {
 	// Keys are server names; values are McpStdioServer, McpHTTPServer, or McpSSEServer.
 	McpServers map[string]any
 
+	// InitTimeout bounds the wait for the CLI to acknowledge the initialize
+	// handshake. Zero means the default (60s, or CLAUDE_CODE_STREAM_CLOSE_TIMEOUT).
+	InitTimeout time.Duration
+
 	// Agents configures named sub-agents available to claude.
 	// Sent via the initialize message.
 	Agents map[string]AgentDefinition
@@ -630,6 +636,17 @@ func WithPermissionHandler(h PermissionHandler) Option {
 
 func WithIncludePartialMessages() Option {
 	return func(o *Options) { o.IncludePartialMessages = true }
+}
+
+// WithInitTimeout sets how long to wait for the CLI to acknowledge the
+// initialize handshake before giving up. Zero or negative restores the default.
+//
+// The default is 60s, matching the official SDKs' floor, and can also be set
+// with CLAUDE_CODE_STREAM_CLOSE_TIMEOUT (milliseconds). MCP servers declared in
+// the options are started during the handshake, so a session with slow servers
+// legitimately needs longer than a bare one.
+func WithInitTimeout(d time.Duration) Option {
+	return func(o *Options) { o.InitTimeout = d }
 }
 
 // WithMcpServers sets external MCP server configurations.
@@ -965,4 +982,27 @@ func warnPermissionHandlerShadowed(o *Options) {
 		return
 	}
 	fmt.Fprintln(os.Stderr, msg)
+}
+
+// defaultInitTimeout is the floor the official SDKs use for the initialize
+// handshake.
+const defaultInitTimeout = 60 * time.Second
+
+// initTimeout resolves the initialize handshake timeout: the explicit option
+// first, then CLAUDE_CODE_STREAM_CLOSE_TIMEOUT (milliseconds, as the official
+// SDKs read it), then the 60s default. Values at or below zero fall through to
+// the default rather than disabling the timeout, which would let a wedged CLI
+// hang startup forever.
+func (o *Options) initTimeout() time.Duration {
+	if o.InitTimeout > 0 {
+		return o.InitTimeout
+	}
+	if raw := os.Getenv("CLAUDE_CODE_STREAM_CLOSE_TIMEOUT"); raw != "" {
+		if ms, err := strconv.Atoi(raw); err == nil && ms > 0 {
+			if d := time.Duration(ms) * time.Millisecond; d > defaultInitTimeout {
+				return d
+			}
+		}
+	}
+	return defaultInitTimeout
 }

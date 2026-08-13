@@ -24,6 +24,17 @@ type Stream struct {
 	// pending maps request_id → response channel for blocking control requests.
 	pending   map[string]chan controlResponse
 	pendingMu sync.Mutex
+
+	// initResp caches the initialize control response. It is written once in
+	// spawnAndStream before the Stream is handed to the caller, so reads need no
+	// synchronisation.
+	initResp *initializeResponse
+
+	// capabilities is captured from the system/init event rather than the
+	// initialize response, which does not carry it. It therefore arrives with
+	// the first turn, so access is mutex-guarded — see Capabilities.
+	capabilities   []string
+	capabilitiesMu sync.RWMutex
 }
 
 // Events returns the receive-only channel of events streamed from the subprocess.
@@ -168,25 +179,78 @@ func (s *Stream) SetMcpServers(servers map[string]any) error {
 	})
 }
 
-// SupportedModels queries the CLI for the list of supported models.
-// Returns the raw JSON response body.
-func (s *Stream) SupportedModels() (json.RawMessage, error) {
-	return s.sendControlRequestWithResponse("supported_models", nil)
+// SupportedModels returns the models the connected CLI offers.
+//
+// The value is read from the initialize handshake completed when the session
+// started: this performs no I/O, never blocks, and is safe to call concurrently.
+func (s *Stream) SupportedModels() []ModelInfo {
+	if s.initResp == nil {
+		return nil
+	}
+	return s.initResp.Models
 }
 
-// SupportedCommands queries the CLI for the list of supported commands.
-func (s *Stream) SupportedCommands() (json.RawMessage, error) {
-	return s.sendControlRequestWithResponse("supported_commands", nil)
+// SupportedCommands returns the slash commands available in this session.
+//
+// Read from the initialize handshake: no I/O, never blocks, concurrency-safe.
+func (s *Stream) SupportedCommands() []SlashCommand {
+	if s.initResp == nil {
+		return nil
+	}
+	return s.initResp.Commands
 }
 
-// SupportedAgents queries the CLI for the list of supported agents.
-func (s *Stream) SupportedAgents() (json.RawMessage, error) {
-	return s.sendControlRequestWithResponse("supported_agents", nil)
+// SupportedAgents returns the subagent types this session can dispatch to.
+//
+// Read from the initialize handshake: no I/O, never blocks, concurrency-safe.
+func (s *Stream) SupportedAgents() []AgentInfo {
+	if s.initResp == nil {
+		return nil
+	}
+	return s.initResp.Agents
 }
 
-// AccountInfo queries the CLI for the current account information.
-func (s *Stream) AccountInfo() (json.RawMessage, error) {
-	return s.sendControlRequestWithResponse("account_info", nil)
+// AccountInfo returns the account the CLI is authenticated as.
+//
+// Read from the initialize handshake: no I/O, never blocks, concurrency-safe.
+func (s *Stream) AccountInfo() AccountInfo {
+	if s.initResp == nil {
+		return AccountInfo{}
+	}
+	return s.initResp.Account
+}
+
+// Capabilities returns the protocol capabilities the connected CLI advertises,
+// for feature detection:
+//
+//	if slices.Contains(stream.Capabilities(), "interrupt_receipt_v1") { … }
+//
+// Unlike the other accessors this is NOT part of the initialize response — the
+// CLI advertises it on the system/init event instead, which arrives with the
+// first turn. It therefore returns nil until a turn has started. Treat an empty
+// list as "not yet known", never as "the CLI supports nothing".
+func (s *Stream) Capabilities() []string {
+	s.capabilitiesMu.RLock()
+	defer s.capabilitiesMu.RUnlock()
+	if s.capabilities == nil {
+		return nil
+	}
+	return append([]string(nil), s.capabilities...)
+}
+
+// OutputStyle returns the session's output style, and the styles available.
+func (s *Stream) OutputStyle() (style string, available []string) {
+	if s.initResp == nil {
+		return "", nil
+	}
+	return s.initResp.OutputStyle, s.initResp.AvailableOutputStyles
+}
+
+// setCapabilities records the capability list seen on a system/init event.
+func (s *Stream) setCapabilities(caps []string) {
+	s.capabilitiesMu.Lock()
+	defer s.capabilitiesMu.Unlock()
+	s.capabilities = caps
 }
 
 // StopTask asks the CLI to stop a running background task.

@@ -1,0 +1,112 @@
+{
+  "type": "control_response",
+  "response": {
+    "subtype": "success",
+    "request_id": "cap-init",
+    "response": {
+      "commands": [
+        {
+          "name": "play-chess",
+          "description": "Play a full chess game on the local games-eval platform as an autonomous agent. Args - a player name, and optionally a match id. Without a match id it creates a new open game, announces the id, and waits for an opponent (agent or human) to join; with a match id it joins that game. Then it plays the whole game to the end via HTTP, commenting on every move. Use when asked to play chess, start a chess match, or join a chess game by id. (user)",
+          "argumentHint": "<player-name> [match-id]"
+        },
+        {
+          "name": "gap-analysis",
+          "description": "Run a verified gap analysis of this Go SDK against the official TypeScript and Python Claude Agent SDKs, generate a report, and (after explicit user approval) create a GitHub Epic issue with native sub-issues for the work. Use when the user asks to run a gap analysis, check parity with the official SDKs, or plan the next release. (project)",
+          "argumentHint": ""
+        },
+        {
+          "name": "deep-research",
+          "description": "Deep research harness \u2014 fan-out web searches, fetch sources, adversarially verify claims, synthesize a cited report. (dynamic workflow)",
+          "argumentHint": ""
+        }
+      ],
+      "agents": [
+        {
+          "name": "claude",
+          "description": "Catch-all for any task that doesn't fit a more specific agent. FleetView's default when no agent name is typed."
+        },
+        {
+          "name": "Explore",
+          "description": "Fast read-only search agent for locating code. Use it to find files by pattern (eg. \"src/components/**/*.tsx\"), grep for symbols or keywords (eg. \"API endpoints\"), or answer \"where is X defined / which files reference Y.\" Do NOT use it for code review, design-doc auditing, cross-file consistency checks, or open-ended analysis \u2014 it reads excerpts rather than whole files and will miss content past its read window. When calling, specify search breadth: \"quick\" for a single targeted lookup, \"medium\" for moderate exploration, or \"very thorough\" to search across multiple locations and naming conventions."
+        },
+        {
+          "name": "general-purpose",
+          "description": "General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you."
+        }
+      ],
+      "output_style": "default",
+      "available_output_styles": [
+        "default",
+        "Proactive",
+        "Explanatory",
+        "Learning"
+      ],
+      "models": [
+        {
+          "value": "default",
+          "resolvedModel": "claude-opus-5[1m]",
+          "displayName": "Default (recommended)",
+          "description": "Opus 5 with 1M context \u00b7 Best for everyday, complex tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsFastMode": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "opus[1m]",
+          "resolvedModel": "claude-opus-5[1m]",
+          "displayName": "Opus (1M context)",
+          "description": "Opus 5 with 1M context \u00b7 Best for everyday, complex tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsFastMode": true,
+          "supportsAutoMode": true
+        },
+        {
+          "value": "claude-fable-5[1m]",
+          "resolvedModel": "claude-fable-5",
+          "displayName": "Fable",
+          "description": "Fable 5 \u00b7 Most capable for your hardest and longest-running tasks",
+          "supportsEffort": true,
+          "supportedEffortLevels": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "supportsAdaptiveThinking": true,
+          "supportsAutoMode": true
+        }
+      ],
+      "account": {
+        "email": "user@example.com",
+        "organization": "Example Org",
+        "subscriptionType": "Claude Max",
+        "apiProvider": "firstParty"
+      },
+      "pid": 12345,
+      "remote_control_auto_enable": false,
+      "remote_control_auto_on_by_default": false,
+      "ide_rc_auto_enable_gate": false,
+      "fast_mode_state": "off",
+      "fast_mode_disabled_reason": "sdk_opt_in_required"
+    }
+  },
+  "request_id": "cap-init"
+}

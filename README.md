@@ -115,6 +115,45 @@ r2, err := claude.Run(ctx, "What is my name?",
 )
 ```
 
+### What the connected CLI supports
+
+The SDK completes an `initialize` handshake with the CLI before the first turn
+starts, and caches the result. These accessors are **instant cache reads** — no
+I/O, never block, safe to call concurrently:
+
+```go
+sess, err := claude.NewSession(ctx, opts...)   // returns once initialize is acknowledged
+defer sess.Close()
+
+for _, m := range sess.SupportedModels() {
+    fmt.Printf("%s → %s (%s)\n", m.Value, m.ResolvedModel, m.DisplayName)
+}
+sess.SupportedCommands()   // []SlashCommand
+sess.SupportedAgents()     // []AgentInfo
+sess.AccountInfo()         // AccountInfo
+sess.OutputStyle()         // style, available
+```
+
+**Feature detection** uses the capability list:
+
+```go
+if slices.Contains(sess.Capabilities(), "interrupt_receipt_v1") {
+    // this CLI populates InterruptReceipt.StillQueued
+}
+```
+
+⚠️ Capabilities are advertised on the `system`/`init` event, **not** in the
+initialize handshake, so they arrive with the first turn. `Capabilities()`
+returns `nil` until then — treat empty as *"not yet known"*, never as *"the CLI
+supports nothing"*.
+
+Because the handshake gates the first turn, MCP servers and agents are fully
+configured before any message is sent. Slow MCP servers make it slower; the wait
+is bounded by `WithInitTimeout` (default 60s, also settable via
+`CLAUDE_CODE_STREAM_CLOSE_TIMEOUT` in milliseconds). If the CLI rejects or never
+answers the handshake, `Query`/`Run`/`NewSession` return a typed
+`*claude.InitializeError` and the subprocess is shut down.
+
 ### Stopping a turn vs ending a session
 
 `Interrupt()` and `Close()` are different operations:
