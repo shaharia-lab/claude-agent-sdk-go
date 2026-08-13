@@ -365,6 +365,27 @@ func Run(ctx context.Context, prompt string, opts ...Option) (*Result, error) {
 	return resultFromStream(stream)
 }
 
+// resultError renders a failed result as a Go error, surfacing the fields a
+// caller would otherwise have to reach for Query() to see: why the loop ended,
+// and the HTTP status when an upstream call was what failed.
+func resultError(r *Result) error {
+	msg := r.Subtype
+	if len(r.Errors) > 0 {
+		msg = strings.Join(r.Errors, "; ")
+	}
+
+	var detail strings.Builder
+	detail.WriteString(r.Subtype)
+	if r.TerminalReason != "" {
+		fmt.Fprintf(&detail, ", %s", r.TerminalReason)
+	}
+	if r.APIErrorStatus != nil {
+		fmt.Fprintf(&detail, ", HTTP %d", *r.APIErrorStatus)
+	}
+
+	return fmt.Errorf("claude: agent error (%s): %s", detail.String(), msg)
+}
+
 // resultFromStream drains a stream and returns its final result, converting
 // error results and process-level failures into Go errors.
 func resultFromStream(stream *Stream) (*Result, error) {
@@ -381,11 +402,7 @@ func resultFromStream(stream *Stream) (*Result, error) {
 					truncate(string(event.Raw), 512))
 			}
 			if r.IsError {
-				msg := r.Subtype
-				if len(r.Errors) > 0 {
-					msg = strings.Join(r.Errors, "; ")
-				}
-				return nil, fmt.Errorf("claude: agent error (%s): %s", r.Subtype, msg)
+				return nil, resultError(r)
 			}
 			return r, nil
 

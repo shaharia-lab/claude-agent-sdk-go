@@ -57,6 +57,16 @@ const (
 	SubtypeInit   = "init"
 	SubtypeStatus = "status"
 
+	// Result subtypes. A run that finished normally is "success"; the rest are
+	// the failure modes, and each pairs with a TerminalReason below. Verified
+	// against captured output: --max-turns 1 produces error_max_turns, and
+	// interrupting a streaming turn produces error_during_execution.
+	SubtypeSuccess                         = "success"
+	SubtypeErrorDuringExecution            = "error_during_execution"
+	SubtypeErrorMaxTurns                   = "error_max_turns"
+	SubtypeErrorMaxBudgetUSD               = "error_max_budget_usd"
+	SubtypeErrorMaxStructuredOutputRetries = "error_max_structured_output_retries"
+
 	// Task lifecycle.
 	SubtypeTaskStarted      = "task_started"
 	SubtypeTaskProgress     = "task_progress"
@@ -555,6 +565,72 @@ type ModelUsage struct {
 
 // ─── Result message ────────────────────────────────────────────────────────────
 
+// TerminalReason says why the agent's loop ended.
+//
+// This is a named string, not a closed enum: the CLI may add reasons at any
+// time and an unrecognised one must decode through unchanged rather than being
+// dropped. Compare against the constants below, and treat anything else as a
+// reason this SDK does not know yet.
+type TerminalReason string
+
+// Terminal reasons. All nine were found in the CLI binary; "completed",
+// "max_turns" and "aborted_streaming" are additionally confirmed by captured
+// fixtures in testdata/messages.
+const (
+	// TerminalCompleted is a run that finished on its own.
+	TerminalCompleted TerminalReason = "completed"
+	// TerminalMaxTurns is the turn limit from WithMaxTurns being reached.
+	TerminalMaxTurns TerminalReason = "max_turns"
+
+	// TerminalAbortedStreaming and TerminalAbortedTools mean the turn was
+	// cancelled — via Stream.Interrupt() or an interrupt control request —
+	// while streaming a response or while running tools. These are how a caller
+	// tells "the user stopped it" from "the model finished".
+	TerminalAbortedStreaming TerminalReason = "aborted_streaming"
+	TerminalAbortedTools     TerminalReason = "aborted_tools"
+
+	// TerminalAPIError is an upstream API failure; see Result.APIErrorStatus
+	// for the HTTP status.
+	TerminalAPIError TerminalReason = "api_error"
+
+	// TerminalBudgetExhausted is the cost limit being hit.
+	TerminalBudgetExhausted TerminalReason = "budget_exhausted"
+	// TerminalStructuredOutputRetryExhausted means structured output failed
+	// schema validation too many times.
+	TerminalStructuredOutputRetryExhausted TerminalReason = "structured_output_retry_exhausted"
+	// TerminalToolDeferredUnavailable means a deferred tool could not be run.
+	TerminalToolDeferredUnavailable TerminalReason = "tool_deferred_unavailable"
+	// TerminalTurnSetupFailed means the turn failed before it began.
+	TerminalTurnSetupFailed TerminalReason = "turn_setup_failed"
+)
+
+// Aborted reports whether the run was cancelled rather than finishing or
+// failing on its own.
+func (r TerminalReason) Aborted() bool {
+	return r == TerminalAbortedStreaming || r == TerminalAbortedTools
+}
+
+// DeferredToolUse is a tool call parked by a PreToolUse hook that returned
+// permissionDecision "defer". The run stops and reports the call here so the
+// caller can inspect it and decide whether to resume.
+type DeferredToolUse struct {
+	ID    string          `json:"id"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input,omitempty"`
+}
+
+// Model providers, the values of ModelUsage.Provider.
+const (
+	ProviderFirstParty           = "firstParty"
+	ProviderBedrock              = "bedrock"
+	ProviderVertex               = "vertex"
+	ProviderFoundry              = "foundry"
+	ProviderAnthropicAWS         = "anthropicAws"
+	ProviderAnthropicGoogleCloud = "anthropicGoogleCloud"
+	ProviderMantle               = "mantle"
+	ProviderGateway              = "gateway"
+)
+
 // Result is the final message emitted by the agent.
 // It covers both SDKResultSuccess and SDKResultError from the TypeScript SDK.
 // Check IsError (or Subtype) to determine which case you have.
@@ -571,6 +647,22 @@ type Result struct {
 	Usage         Usage       `json:"usage"`
 	SessionID     string      `json:"session_id"`
 	UUID          string      `json:"uuid"`
+
+	// TerminalReason says why the loop ended. Unlike Subtype, it distinguishes
+	// a cancelled turn from a completed one — see TerminalReason.Aborted().
+	TerminalReason TerminalReason `json:"terminal_reason,omitempty"`
+
+	// APIErrorStatus is the HTTP status of the failing upstream call (429, 500,
+	// 529, …) — nil when the CLI sent none, which is why it is a pointer rather
+	// than a zero-means-absent int.
+	//
+	// It can be set on a "success" subtype whose IsError is true, so branch on
+	// this field rather than on Subtype when classifying a failure for retry.
+	APIErrorStatus *int `json:"api_error_status,omitempty"`
+
+	// DeferredToolUse is the tool call a PreToolUse hook deferred, if any.
+	DeferredToolUse *DeferredToolUse `json:"deferred_tool_use,omitempty"`
+
 	// ModelUsages holds per-model token and cost breakdowns keyed by model ID.
 	ModelUsages map[string]ModelUsage `json:"modelUsage,omitempty"`
 	// Populated when IsError is true.

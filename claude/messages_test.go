@@ -789,3 +789,183 @@ func TestContentBlocks_NullIsNotAnEmptyTextBlock(t *testing.T) {
 		t.Errorf("null content must decode to no blocks, got %+v", blocks)
 	}
 }
+
+// ─── Result completeness (#28) ────────────────────────────────────────────────
+
+// A run that hit the turn limit reports both the subtype and the reason. The
+// captured fixture comes from `--max-turns 1`.
+func TestParseLine_ResultMaxTurns(t *testing.T) {
+	event, err := parseLine(readMessageFixture(t, "result_max_turns.json"))
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if event.Result == nil {
+		t.Fatal("Result is nil")
+	}
+	if event.DecodeErr != nil {
+		t.Fatalf("captured payload should decode cleanly: %v", event.DecodeErr)
+	}
+
+	r := event.Result
+	if r.Subtype != SubtypeErrorMaxTurns {
+		t.Errorf("expected subtype %q, got %q", SubtypeErrorMaxTurns, r.Subtype)
+	}
+	if r.TerminalReason != TerminalMaxTurns {
+		t.Errorf("expected terminal_reason %q, got %q", TerminalMaxTurns, r.TerminalReason)
+	}
+	if r.TerminalReason.Aborted() {
+		t.Error("hitting the turn limit is not a cancellation")
+	}
+	if !r.IsError {
+		t.Error("is_error was true on the wire")
+	}
+}
+
+// An interrupted turn is the case Subtype alone cannot express: it reports
+// error_during_execution, exactly like other execution failures. terminal_reason
+// is what distinguishes "the user stopped it" (#18).
+func TestParseLine_ResultAbortedByInterrupt(t *testing.T) {
+	event, err := parseLine(readMessageFixture(t, "result_aborted_streaming.json"))
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if event.Result == nil {
+		t.Fatal("Result is nil")
+	}
+	if event.DecodeErr != nil {
+		t.Fatalf("captured payload should decode cleanly: %v", event.DecodeErr)
+	}
+
+	r := event.Result
+	if r.TerminalReason != TerminalAbortedStreaming {
+		t.Fatalf("expected terminal_reason %q, got %q", TerminalAbortedStreaming, r.TerminalReason)
+	}
+	if !r.TerminalReason.Aborted() {
+		t.Error("aborted_streaming must report as a cancellation")
+	}
+	// The point of the field: the subtype is indistinguishable from any other
+	// execution error, so only terminal_reason identifies the interrupt.
+	if r.Subtype != SubtypeErrorDuringExecution {
+		t.Errorf("expected subtype %q, got %q", SubtypeErrorDuringExecution, r.Subtype)
+	}
+}
+
+// A successful run reports terminal_reason too, and carries no api_error_status.
+func TestParseLine_ResultSuccessTerminalReason(t *testing.T) {
+	event, err := parseLine(readMessageFixture(t, "result_success.json"))
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+
+	r := event.Result
+	if r.TerminalReason != TerminalCompleted {
+		t.Errorf("expected terminal_reason %q, got %q", TerminalCompleted, r.TerminalReason)
+	}
+	if r.APIErrorStatus != nil {
+		t.Errorf("api_error_status was null on the wire; want nil, got %d", *r.APIErrorStatus)
+	}
+	if r.DeferredToolUse != nil {
+		t.Error("no tool was deferred in this run")
+	}
+}
+
+// api_error_status must distinguish "absent" from any value, including 0 —
+// which is why it is a pointer. No session here produced an upstream failure,
+// so this drives the decoder with the shape the CLI documents.
+func TestResult_APIErrorStatusAbsentVsPresent(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		wire  string
+		want  int
+		isNil bool
+	}{
+		{name: "absent", wire: `{"type":"result"}`, isNil: true},
+		{name: "null", wire: `{"type":"result","api_error_status":null}`, isNil: true},
+		{name: "rate limited", wire: `{"type":"result","api_error_status":429}`, want: 429},
+		{name: "overloaded", wire: `{"type":"result","api_error_status":529}`, want: 529},
+		{name: "zero", wire: `{"type":"result","api_error_status":0}`, want: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event, err := parseLine([]byte(tc.wire))
+			if err != nil {
+				t.Fatalf("parseLine: %v", err)
+			}
+			got := event.Result.APIErrorStatus
+
+			if tc.isNil {
+				if got != nil {
+					t.Fatalf("expected nil, got %d", *got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("expected a status, got nil")
+			}
+			if *got != tc.want {
+				t.Errorf("expected %d, got %d", tc.want, *got)
+			}
+		})
+	}
+}
+
+// TerminalReason is a named string, not a closed enum: a reason this SDK has
+// never heard of must survive decoding so callers can log or branch on it.
+func TestTerminalReason_UnknownValueSurvives(t *testing.T) {
+	event, err := parseLine([]byte(`{"type":"result","terminal_reason":"abducted_by_aliens"}`))
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if got := event.Result.TerminalReason; got != "abducted_by_aliens" {
+		t.Errorf("unknown terminal_reason was not preserved: %q", got)
+	}
+	if event.Result.TerminalReason.Aborted() {
+		t.Error("an unknown reason must not be reported as a cancellation")
+	}
+}
+
+// The deferred tool call a PreToolUse "defer" decision parks. Hooks cannot
+// return "defer" from this SDK yet (#32), so this proves the decode path only.
+func TestResult_DeferredToolUseDecodes(t *testing.T) {
+	line := []byte(`{"type":"result","subtype":"success","deferred_tool_use":
+		{"id":"toolu_01ABC","name":"Bash","input":{"command":"ls -la"}}}`)
+
+	event, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	d := event.Result.DeferredToolUse
+	if d == nil {
+		t.Fatal("deferred_tool_use did not decode")
+	}
+	if d.ID != "toolu_01ABC" || d.Name != "Bash" {
+		t.Errorf("id/name did not decode: %+v", d)
+	}
+	var input map[string]any
+	if err := json.Unmarshal(d.Input, &input); err != nil {
+		t.Fatalf("input should be preserved as raw JSON: %v", err)
+	}
+	if input["command"] != "ls -la" {
+		t.Errorf("input did not decode: %v", input)
+	}
+}
+
+// The captured modelUsage entry carries the fields that identify which model
+// and provider a cost belongs to.
+func TestParseLine_ModelUsageIdentityFields(t *testing.T) {
+	event, err := parseLine(readMessageFixture(t, "result_success.json"))
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if len(event.Result.ModelUsages) == 0 {
+		t.Fatal("modelUsage did not decode")
+	}
+
+	for model, mu := range event.Result.ModelUsages {
+		if mu.CanonicalModel == "" {
+			t.Errorf("%s: canonicalModel did not decode", model)
+		}
+		if mu.Provider != ProviderFirstParty {
+			t.Errorf("%s: expected provider %q, got %q", model, ProviderFirstParty, mu.Provider)
+		}
+	}
+}
