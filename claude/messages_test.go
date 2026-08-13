@@ -1351,3 +1351,67 @@ func TestTaskUpdated_TopLevelStatusWins(t *testing.T) {
 		t.Errorf("expected the top-level status to win, got %q", event.TaskUpdated.Status)
 	}
 }
+
+// The hazard this design exists for: a killed task whose task_notification never
+// arrives. The captured killed session DID receive one, so this drives the same
+// tracker with the notification removed — a consumer that clears only on
+// notifications leaks the task forever.
+func TestTaskLifecycle_TerminalViaUpdatedOnly(t *testing.T) {
+	var sequence []Event
+	for _, event := range readLifecycle(t, "task_lifecycle_killed.jsonl") {
+		if event.TaskNotification != nil {
+			continue // simulate the suppressed notification
+		}
+		sequence = append(sequence, event)
+	}
+
+	active := map[string]bool{}
+	notificationOnly := map[string]bool{}
+
+	for _, event := range sequence {
+		switch {
+		case event.TaskStarted != nil:
+			active[event.TaskStarted.TaskID] = true
+			notificationOnly[event.TaskStarted.TaskID] = true
+		case event.TaskUpdated != nil && event.TaskUpdated.Status.IsTerminal():
+			delete(active, event.TaskUpdated.TaskID)
+		case event.TaskNotification != nil && event.TaskNotification.Status.IsTerminal():
+			delete(notificationOnly, event.TaskNotification.TaskID)
+		}
+	}
+
+	if len(active) != 0 {
+		t.Errorf("clearing on task_updated must release the task; leaked %v", active)
+	}
+	if len(notificationOnly) == 0 {
+		t.Fatal("this fixture no longer exercises the hazard: the task ended without a notification, " +
+			"so a notification-only consumer should still be holding it")
+	}
+}
+
+// task_progress could not be provoked from the CLI, so this drives the decoder
+// with the shape the CLI's own emit code constructs.
+func TestParseLine_TaskProgress(t *testing.T) {
+	line := []byte(`{"type":"system","subtype":"task_progress","task_id":"t1",
+		"tool_use_id":"toolu_1","description":"Research the codebase",
+		"subagent_type":"Explore","usage":{"total_tokens":1234,"tool_uses":7,"duration_ms":8500},
+		"last_tool_name":"Grep","summary":"looked at 12 files","session_id":"s","uuid":"u"}`)
+
+	event, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	tp := event.TaskProgress
+	if tp == nil {
+		t.Fatal("TaskProgress was not populated")
+	}
+	if tp.TaskID != "t1" || tp.SubagentType != "Explore" || tp.LastToolName != "Grep" {
+		t.Errorf("fields did not decode: %+v", tp)
+	}
+	if tp.Usage.TotalTokens != 1234 || tp.Usage.ToolUses != 7 || tp.Usage.DurationMS != 8500 {
+		t.Errorf("usage did not decode: %+v", tp.Usage)
+	}
+	if len(tp.Raw) == 0 {
+		t.Error("Raw tail is missing")
+	}
+}
