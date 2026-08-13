@@ -55,4 +55,5 @@ The SDK does not call the Claude API directly — it spawns the `claude` CLI as 
 
 - Every PR must be linked to a GitHub issue (see CONTRIBUTING.md); reference it with `Fixes #N`.
 - Keep behavior consistent with the official TS/Python SDKs; incompatibilities are treated as bugs.
-- Go 1.24+ is the supported minimum (CI runs 1.24).
+- Go 1.25+ is the supported minimum, as declared in `go.mod`; CI reads the
+  version from `go.mod` (`go-version-file`) rather than hardcoding it.
