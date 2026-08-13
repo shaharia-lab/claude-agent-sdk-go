@@ -410,7 +410,7 @@ func resultFromStream(stream *Stream) (*Result, error) {
 			// Surface process-level errors (bad flag, auth failure, crash) that
 			// were synthesised by spawnAndStream because no result message arrived.
 			if event.System != nil && event.System.Subtype == "error" {
-				return nil, fmt.Errorf("claude: %s", event.System.Message)
+				return nil, fmt.Errorf("claude: %s", event.System.Error)
 			}
 		}
 	}

@@ -55,7 +55,7 @@ func main() {
 				goto nextTurn
 			case claude.TypeSystem:
 				if event.System != nil && event.System.Subtype == "error" {
-					fmt.Fprintln(os.Stderr, "error:", event.System.Message)
+					fmt.Fprintln(os.Stderr, "error:", event.System.Error)
 					os.Exit(1)
 				}
 			}

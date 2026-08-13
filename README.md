@@ -128,8 +128,57 @@ carries `Event.Raw` alone.
 | `TypeStreamEvent` | `StreamEvent` | One incremental event of a streamed turn (needs `WithIncludePartialMessages()`) |
 | `TypeResult` | `Result` | The final message: cost, cumulative `ModelUsages`, permission denials |
 | `TypeSystem` | `System` | Session lifecycle. Task and hook events arrive here as **subtypes**; task subtypes also populate `Task` |
-| `TypeToolProgress` | `ToolProgress` | Incremental progress from a running tool |
-| `TypeRateLimitEvent` | — | `Raw` only |
+| `TypeToolProgress` | `ToolProgress` | A tool is still running — `ToolName`, `ElapsedTimeSeconds`, `Heartbeat` |
+| `TypeRateLimitEvent` | `RateLimit` | Rate-limit state: window, reset time, overage |
+
+System messages additionally populate a lifecycle field according to their
+subtype — `task_started` → `TaskStarted`, `task_progress` → `TaskProgress`,
+`task_notification` → `TaskNotification`, `task_updated` → `TaskUpdated`, and
+the `hook_*` subtypes → `HookLifecycle`. `System` is always set alongside them.
+
+### Tracking background tasks
+
+A background task reports its state through **two overlapping vocabularies**,
+and getting this wrong leaks tasks forever:
+
+- `task_updated` carries the raw lifecycle state — a stopped task is **`killed`**,
+  and the status lives **inside `patch`**, not at the top level (the SDK lifts it
+  onto `TaskUpdated.Status` for you).
+- `task_notification` carries the user-facing outcome, where the same stop is
+  **`stopped`**. It is not guaranteed to follow.
+
+So clear your tracking on a terminal status from **either** message. `IsTerminal()`
+spans both vocabularies:
+
+```go
+active := map[string]string{}
+
+switch {
+case ev.TaskStarted != nil:
+    active[ev.TaskStarted.TaskID] = ev.TaskStarted.Description
+
+case ev.TaskUpdated != nil && ev.TaskUpdated.Status.IsTerminal():
+    delete(active, ev.TaskUpdated.TaskID)      // "killed" arrives here
+
+case ev.TaskNotification != nil && ev.TaskNotification.Status.IsTerminal():
+    delete(active, ev.TaskNotification.TaskID) // "stopped" arrives here
+}
+```
+
+### Backing off on rate limits
+
+```go
+if ev.RateLimit != nil {
+    info := ev.RateLimit.RateLimitInfo
+    if info.Limited() {   // status == "rejected"
+        log.Printf("rate limited (%s), resets at %d", info.RateLimitType, info.ResetsAt)
+    }
+}
+```
+
+`RateLimitStatus` and `RateLimitType` are open named strings — an unrecognised
+window decodes through. Note the inner object is **camelCase** on the wire
+(`resetsAt`, `rateLimitType`), like `modelUsage` and unlike the message around it.
 
 A message's `Content` is a `[]ContentBlock` — one struct with a `Type`
 discriminator covering the whole union, so unknown block types degrade to

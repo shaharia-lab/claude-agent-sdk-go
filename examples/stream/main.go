@@ -42,7 +42,7 @@ func main() {
 			case claude.SubtypeInit:
 				fmt.Fprintf(os.Stderr, "[init] model=%s session=%s\n", s.Model, s.SessionID)
 			case "error":
-				fmt.Fprintf(os.Stderr, "[error] %s\n", s.Message)
+				fmt.Fprintf(os.Stderr, "[error] %s\n", s.Error)
 				os.Exit(1)
 			}
 
