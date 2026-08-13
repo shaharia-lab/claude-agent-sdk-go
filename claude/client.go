@@ -369,11 +369,6 @@ func Run(ctx context.Context, prompt string, opts ...Option) (*Result, error) {
 // caller would otherwise have to reach for Query() to see: why the loop ended,
 // and the HTTP status when an upstream call was what failed.
 func resultError(r *Result) error {
-	msg := r.Subtype
-	if len(r.Errors) > 0 {
-		msg = strings.Join(r.Errors, "; ")
-	}
-
 	var detail strings.Builder
 	detail.WriteString(r.Subtype)
 	if r.TerminalReason != "" {
@@ -383,7 +378,12 @@ func resultError(r *Result) error {
 		fmt.Fprintf(&detail, ", HTTP %d", *r.APIErrorStatus)
 	}
 
-	return fmt.Errorf("claude: agent error (%s): %s", detail.String(), msg)
+	// The CLI does not always send an errors list; repeating the subtype as the
+	// message when it doesn't adds nothing the detail above hasn't said.
+	if len(r.Errors) == 0 {
+		return fmt.Errorf("claude: agent error (%s)", detail.String())
+	}
+	return fmt.Errorf("claude: agent error (%s): %s", detail.String(), strings.Join(r.Errors, "; "))
 }
 
 // resultFromStream drains a stream and returns its final result, converting

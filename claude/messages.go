@@ -57,16 +57,6 @@ const (
 	SubtypeInit   = "init"
 	SubtypeStatus = "status"
 
-	// Result subtypes. A run that finished normally is "success"; the rest are
-	// the failure modes, and each pairs with a TerminalReason below. Verified
-	// against captured output: --max-turns 1 produces error_max_turns, and
-	// interrupting a streaming turn produces error_during_execution.
-	SubtypeSuccess                         = "success"
-	SubtypeErrorDuringExecution            = "error_during_execution"
-	SubtypeErrorMaxTurns                   = "error_max_turns"
-	SubtypeErrorMaxBudgetUSD               = "error_max_budget_usd"
-	SubtypeErrorMaxStructuredOutputRetries = "error_max_structured_output_retries"
-
 	// Task lifecycle.
 	SubtypeTaskStarted      = "task_started"
 	SubtypeTaskProgress     = "task_progress"
@@ -564,6 +554,19 @@ type ModelUsage struct {
 }
 
 // ─── Result message ────────────────────────────────────────────────────────────
+
+// Result subtypes, the values of Result.Subtype. These are NOT system message
+// subtypes — they classify how a run finished, and each pairs with a
+// TerminalReason below. Verified against captured output: `--max-turns 1`
+// produces error_max_turns, and interrupting a streaming turn produces
+// error_during_execution.
+const (
+	SubtypeSuccess                         = "success"
+	SubtypeErrorDuringExecution            = "error_during_execution"
+	SubtypeErrorMaxTurns                   = "error_max_turns"
+	SubtypeErrorMaxBudgetUSD               = "error_max_budget_usd"
+	SubtypeErrorMaxStructuredOutputRetries = "error_max_structured_output_retries"
+)
 
 // TerminalReason says why the agent's loop ended.
 //
