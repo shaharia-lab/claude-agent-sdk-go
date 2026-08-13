@@ -502,12 +502,24 @@ func initializeMsg(opts *Options, hooksConfig map[string]any) any {
 		"promptSuggestions":  opts.PromptSuggestions,
 	}
 
-	// Only send sdkMcpServers when there is something to send: the CLI rejects
-	// the whole initialize ("must be arrays of strings") on an empty object,
-	// which would take hooks and agents down with it.
-	if len(opts.McpServers) > 0 {
-		req["sdkMcpServers"] = opts.McpServers
-	}
+	// sdkMcpServers is deliberately never sent.
+	//
+	// The key declares SDK-*hosted* servers: the CLI keeps no transport for them
+	// and instead routes their JSON-RPC traffic back to us as `mcp_message`
+	// control_requests. This SDK has no such servers — StartInProcessMCPServer
+	// and WithTools bind a real loopback HTTP listener (mcp.go), and
+	// SelfAsStdioMCPServer re-execs the binary as a stdio server, so every server
+	// reaches the CLI as an ordinary transport config through --mcp-config
+	// (options.go) and is dialled directly. Naming them here would tell the CLI
+	// to route their tool calls over `mcp_message`, which we do not implement —
+	// the calls would be acknowledged and dropped.
+	//
+	// The CLI accepts only an array of strings (verified against 2.1.224: omitted
+	// and [] and ["name"] succeed; any object or array-of-objects is rejected with
+	// "sdkMcpServers and webSearchIsolationExemptMcpServers must be arrays of
+	// strings", which fails the *entire* initialize and silently takes hooks,
+	// agents, system prompt and output format down with it). The official Python
+	// SDK likewise never sends it. See TestInitializeMsg_NeverSendsSdkMcpServers.
 
 	if opts.OutputFormat != nil {
 		req["outputFormat"] = opts.OutputFormat.Type

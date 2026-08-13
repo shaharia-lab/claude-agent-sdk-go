@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -617,14 +618,87 @@ func TestHandleControlRequest_HookCallback_HookError(t *testing.T) {
 	}
 }
 
-// The CLI rejects the entire initialize when sdkMcpServers is an empty object
-// ("sdkMcpServers and webSearchIsolationExemptMcpServers must be arrays of
-// strings"), which would take hooks down with it, so the key is omitted when
-// there are no servers.
-func TestInitializeMsg_OmitsEmptySdkMcpServers(t *testing.T) {
-	msg := initializeMsg(defaultOptions(), map[string]any{})
+// sdkMcpServers must never appear in the initialize request, with or without
+// servers configured.
+//
+// The key declares SDK-*hosted* servers, whose JSON-RPC traffic the CLI routes
+// back over `mcp_message` control_requests. This SDK has none: every server it
+// builds is a real loopback HTTP listener or a stdio subprocess, delivered to
+// the CLI through --mcp-config and dialled directly.
+//
+// Sending the map (the pre-#38 behaviour) fails the whole initialize and
+// silently disables hooks, agents, system prompt and output format. Sending the
+// names instead makes initialize succeed but strips the servers' transports, so
+// their tools disappear from the session entirely. Both were measured against a
+// real CLI — see testdata/sdk_mcp_servers_initialize_matrix.json.
+func TestInitializeMsg_NeverSendsSdkMcpServers(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		servers map[string]any
+	}{
+		{"no servers", nil},
+		{"empty map", map[string]any{}},
+		{"one server", map[string]any{
+			"time-server": McpHTTPServer{Type: "http", URL: "http://127.0.0.1:1234"},
+		}},
+		{"several servers", map[string]any{
+			"time-server": McpHTTPServer{Type: "http", URL: "http://127.0.0.1:1234"},
+			"self-server": McpStdioServer{Type: "stdio", Command: "/bin/echo"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := defaultOptions()
+			opts.McpServers = tc.servers
 
-	b, err := json.Marshal(msg)
+			b, err := json.Marshal(initializeMsg(opts, map[string]any{}))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var envelope struct {
+				Request map[string]json.RawMessage `json:"request"`
+			}
+			if err := json.Unmarshal(b, &envelope); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if raw, present := envelope.Request["sdkMcpServers"]; present {
+				t.Fatalf("sdkMcpServers must never be sent, got %s in %s", raw, b)
+			}
+		})
+	}
+}
+
+// The initialize payload the SDK actually sends must be one a real CLI accepts.
+//
+// Drives initializeMsg with servers configured, reads back the sdkMcpServers
+// shape it emitted, and looks that shape up in the captured probe matrix — so
+// this fails if the emitted shape ever stops matching a recorded `success`.
+func TestInitializeMsg_MatchesCapturedCLIContract(t *testing.T) {
+	raw, err := os.ReadFile("testdata/sdk_mcp_servers_initialize_matrix.json")
+	if err != nil {
+		t.Fatalf("read matrix: %v", err)
+	}
+	var matrix struct {
+		Cases []struct {
+			Description string          `json:"description"`
+			Payload     json.RawMessage `json:"sdkMcpServers"`
+			Omitted     bool            `json:"omitted"`
+			Subtype     string          `json:"cliSubtype"`
+			CLIError    string          `json:"cliError"`
+		} `json:"cases"`
+	}
+	if err := json.Unmarshal(raw, &matrix); err != nil {
+		t.Fatalf("unmarshal matrix: %v", err)
+	}
+	if len(matrix.Cases) == 0 {
+		t.Fatal("matrix is empty")
+	}
+
+	// What the SDK actually emits, with servers configured.
+	opts := defaultOptions()
+	opts.McpServers = map[string]any{
+		"time-server": McpHTTPServer{Type: "http", URL: "http://127.0.0.1:1234"},
+	}
+	b, err := json.Marshal(initializeMsg(opts, map[string]any{}))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -634,9 +708,31 @@ func TestInitializeMsg_OmitsEmptySdkMcpServers(t *testing.T) {
 	if err := json.Unmarshal(b, &envelope); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if _, present := envelope.Request["sdkMcpServers"]; present {
-		t.Fatalf("expected sdkMcpServers to be omitted when empty, got %s", b)
+	emitted, emittedPresent := envelope.Request["sdkMcpServers"]
+
+	// Find the captured case describing that shape and require the CLI accepted it.
+	for _, c := range matrix.Cases {
+		if c.Omitted != emittedPresent {
+			// Absent-vs-absent, or present-vs-present with matching bytes.
+			if !emittedPresent && c.Omitted {
+				if c.Subtype != "success" {
+					t.Fatalf("the CLI rejects what the SDK sends (key omitted): %s", c.CLIError)
+				}
+				return
+			}
+		}
+		if emittedPresent && !c.Omitted && bytes.Equal(bytes.TrimSpace(c.Payload), bytes.TrimSpace(emitted)) {
+			if c.Subtype != "success" {
+				t.Fatalf("the SDK emits sdkMcpServers=%s, which the captured CLI rejects: %s", emitted, c.CLIError)
+			}
+			return
+		}
 	}
+
+	if emittedPresent {
+		t.Fatalf("the SDK emits sdkMcpServers=%s, a shape never probed against a real CLI — add it to the matrix", emitted)
+	}
+	t.Fatal("matrix has no case for an omitted sdkMcpServers")
 }
 
 // ─── can_use_tool (#17) ──────────────────────────────────────────────────────

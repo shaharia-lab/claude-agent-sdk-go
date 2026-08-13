@@ -10,6 +10,7 @@ broken precisely because the fixtures encoded an invented shape (see #16).
 | `can_use_tool_write.json` | `claude` 2.1.224 | A `can_use_tool` control_request for the `Write` tool, triggered by writing outside the working directory under `--permission-mode manual --permission-prompt-tool stdio`. Carries `display_name`, `description`, `decision_reason`, `permission_suggestions` and `tool_use_id`. Note it has **no** `title` or `blocked_path`; the reason is conveyed via `decision_reason` plus a `decision_reason_type` the SDK does not yet decode. |
 | `control_response_set_permission_mode_success.json` | `claude` 2.1.224 | A successful `control_response` **carrying** a payload. `request_id` lives at `response.request_id` — there is no top-level one — and the caller's value is the innermost `response` (`{"mode":"default"}`), not the wrapper. |
 | `control_response_set_model_success.json` | `claude` 2.1.224 | A successful `control_response` with **no** payload at all: `response` holds only `subtype` and `request_id`. Proves an absent inner `response` means success-without-data, not an error (see #36). |
+| `sdk_mcp_servers_initialize_matrix.json` | `claude` 2.1.224 | Every `sdkMcpServers` shape probed against a real `initialize`, with the CLI's verdict for each. Only an array of strings is accepted; any object or array-of-objects fails the **entire** initialize, taking hooks, agents, system prompt and output format with it. Naming servers is accepted but wrong for this SDK — it marks them SDK-hosted, so the CLI drops their transports and expects `mcp_message` routing we do not implement. Hence the key is never sent (#38). |
 | `control_response_error_unsupported_subtype.json` | `claude` 2.1.224 | The error variant: `subtype:"error"` plus a human-readable `error`, again with no inner `response`. Also incidental evidence that this CLI rejects the `supported_commands` subtype outright (that gap is #19, not #36). |
 
 Machine-specific values (`transcript_path`, `cwd`) were replaced with
@@ -30,5 +31,15 @@ into the CLI and keep the replies:
   echo '{"type":"control_request","request_id":"cap-perm","request":{"subtype":"set_permission_mode","mode":"default"}}'; sleep 3
   echo '{"type":"control_request","request_id":"cap-err","request":{"subtype":"supported_commands"}}'; sleep 3
 } | claude --input-format stream-json --output-format stream-json --verbose \
+  | grep '"type":"control_response"'
+```
+
+To re-capture the `sdkMcpServers` matrix, send an `initialize` control_request
+per candidate value and record `response.subtype` plus `response.error`:
+
+```sh
+for v in 'null' '[]' '["s"]' '{}' '{"s":{"type":"http","url":"http://127.0.0.1:1"}}'; do
+  echo "{\"type\":\"control_request\",\"request_id\":\"cap\",\"request\":{\"subtype\":\"initialize\",\"sdkMcpServers\":$v}}"
+done | claude --input-format stream-json --output-format stream-json --verbose \
   | grep '"type":"control_response"'
 ```
