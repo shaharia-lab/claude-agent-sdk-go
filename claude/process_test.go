@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -666,9 +667,11 @@ func TestInitializeMsg_NeverSendsSdkMcpServers(t *testing.T) {
 	}
 }
 
-// The initialize payload the SDK actually sends must be one the CLI accepts.
-// Pins the shapes measured in testdata/sdk_mcp_servers_initialize_matrix.json:
-// anything the CLI rejects must not be producible by initializeMsg.
+// The initialize payload the SDK actually sends must be one a real CLI accepts.
+//
+// Drives initializeMsg with servers configured, reads back the sdkMcpServers
+// shape it emitted, and looks that shape up in the captured probe matrix — so
+// this fails if the emitted shape ever stops matching a recorded `success`.
 func TestInitializeMsg_MatchesCapturedCLIContract(t *testing.T) {
 	raw, err := os.ReadFile("testdata/sdk_mcp_servers_initialize_matrix.json")
 	if err != nil {
@@ -676,10 +679,11 @@ func TestInitializeMsg_MatchesCapturedCLIContract(t *testing.T) {
 	}
 	var matrix struct {
 		Cases []struct {
-			Payload  json.RawMessage `json:"sdkMcpServers"`
-			Omitted  bool            `json:"omitted"`
-			Subtype  string          `json:"cliSubtype"`
-			CLIError string          `json:"cliError"`
+			Description string          `json:"description"`
+			Payload     json.RawMessage `json:"sdkMcpServers"`
+			Omitted     bool            `json:"omitted"`
+			Subtype     string          `json:"cliSubtype"`
+			CLIError    string          `json:"cliError"`
 		} `json:"cases"`
 	}
 	if err := json.Unmarshal(raw, &matrix); err != nil {
@@ -689,30 +693,46 @@ func TestInitializeMsg_MatchesCapturedCLIContract(t *testing.T) {
 		t.Fatal("matrix is empty")
 	}
 
-	// The shape the SDK emits: the key absent entirely.
-	var omittedAccepted bool
-	for _, c := range matrix.Cases {
-		if c.Omitted {
-			if c.Subtype != "success" {
-				t.Fatalf("captured CLI rejects an omitted sdkMcpServers (%s) — the SDK's payload is no longer valid", c.CLIError)
-			}
-			omittedAccepted = true
-		}
+	// What the SDK actually emits, with servers configured.
+	opts := defaultOptions()
+	opts.McpServers = map[string]any{
+		"time-server": McpHTTPServer{Type: "http", URL: "http://127.0.0.1:1234"},
 	}
-	if !omittedAccepted {
-		t.Fatal("matrix has no case for an omitted sdkMcpServers")
+	b, err := json.Marshal(initializeMsg(opts, map[string]any{}))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var envelope struct {
+		Request map[string]json.RawMessage `json:"request"`
+	}
+	if err := json.Unmarshal(b, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	emitted, emittedPresent := envelope.Request["sdkMcpServers"]
+
+	// Find the captured case describing that shape and require the CLI accepted it.
+	for _, c := range matrix.Cases {
+		if c.Omitted != emittedPresent {
+			// Absent-vs-absent, or present-vs-present with matching bytes.
+			if !emittedPresent && c.Omitted {
+				if c.Subtype != "success" {
+					t.Fatalf("the CLI rejects what the SDK sends (key omitted): %s", c.CLIError)
+				}
+				return
+			}
+		}
+		if emittedPresent && !c.Omitted && bytes.Equal(bytes.TrimSpace(c.Payload), bytes.TrimSpace(emitted)) {
+			if c.Subtype != "success" {
+				t.Fatalf("the SDK emits sdkMcpServers=%s, which the captured CLI rejects: %s", emitted, c.CLIError)
+			}
+			return
+		}
 	}
 
-	// Every object-shaped payload must be recorded as rejected; if a future CLI
-	// starts accepting one, this test is the prompt to revisit the decision.
-	for _, c := range matrix.Cases {
-		if c.Omitted || len(c.Payload) == 0 {
-			continue
-		}
-		if c.Payload[0] == '{' && c.Subtype != "error" {
-			t.Fatalf("captured CLI now accepts an object sdkMcpServers (%s) — revisit #38", c.Payload)
-		}
+	if emittedPresent {
+		t.Fatalf("the SDK emits sdkMcpServers=%s, a shape never probed against a real CLI — add it to the matrix", emitted)
 	}
+	t.Fatal("matrix has no case for an omitted sdkMcpServers")
 }
 
 // ─── can_use_tool (#17) ──────────────────────────────────────────────────────
