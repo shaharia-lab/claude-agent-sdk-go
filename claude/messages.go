@@ -25,32 +25,51 @@ const (
 	TypeToolProgress MessageType = "tool_progress"
 	// TypeToolUseSummary carries a summary of a tool use after completion.
 	TypeToolUseSummary MessageType = "tool_use_summary"
-	// TypeTaskStarted is emitted when a background task starts.
-	TypeTaskStarted MessageType = "task_started"
-	// TypeTaskProgress carries incremental task progress updates.
-	TypeTaskProgress MessageType = "task_progress"
-	// TypeTaskNotification is emitted for task-related notifications.
-	TypeTaskNotification MessageType = "task_notification"
-	// TypeHookStarted is emitted when a hook begins execution.
-	TypeHookStarted MessageType = "hook_started"
-	// TypeHookProgress carries incremental hook execution progress.
-	TypeHookProgress MessageType = "hook_progress"
-	// TypeHookResponse is emitted when a hook produces a response.
-	TypeHookResponse MessageType = "hook_response"
-	// TypeCompactBoundary marks context compaction boundaries.
-	TypeCompactBoundary MessageType = "compact_boundary"
-	// TypeFilesPersisted is emitted when files are checkpointed to disk.
-	TypeFilesPersisted MessageType = "files_persisted"
 	// TypeAuthStatus carries authentication status updates.
 	TypeAuthStatus MessageType = "auth_status"
 	// TypePromptSuggestion carries prompt suggestions from the agent.
 	TypePromptSuggestion MessageType = "prompt_suggestion"
 )
 
+// PluginInfo describes one plugin loaded into the session, as reported on the
+// system/init event. Verified against captured output (#23) — note the wire
+// carries a source alongside name/path/version.
+type PluginInfo struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	// Source is the marketplace reference, e.g. "lab-workflow@shaharia-lab".
+	Source  string `json:"source,omitempty"`
+	Version string `json:"version,omitempty"`
+}
+
 // System message subtype constants.
+// These are the subtypes of a TypeSystem message. They are NOT top-level
+// message types: nothing on the wire ever carries type:"task_started". They
+// lived in the MessageType block until #23, which made eight parse branches
+// permanently dead — including the only one that could populate Event.Task.
 const (
 	SubtypeInit   = "init"
 	SubtypeStatus = "status"
+
+	// Task lifecycle.
+	SubtypeTaskStarted      = "task_started"
+	SubtypeTaskProgress     = "task_progress"
+	SubtypeTaskNotification = "task_notification"
+
+	// Hook lifecycle.
+	SubtypeHookStarted  = "hook_started"
+	SubtypeHookProgress = "hook_progress"
+	SubtypeHookResponse = "hook_response"
+
+	// Session lifecycle.
+	SubtypeCompactBoundary = "compact_boundary"
+	SubtypeFilesPersisted  = "files_persisted"
+
+	// Observed on the wire while capturing the #23 corpus, and carried here so
+	// callers can switch on them without string literals. Their payloads are not
+	// typed yet — read Event.Raw.
+	SubtypeThinkingTokens        = "thinking_tokens"
+	SubtypeBackgroundTasksChange = "background_tasks_changed"
 )
 
 // ─── Content blocks ────────────────────────────────────────────────────────────
@@ -138,18 +157,41 @@ type Usage struct {
 	OutputTokens             int `json:"output_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
-	WebSearchRequests        int `json:"web_search_requests,omitempty"`
+
+	// ServerToolUse counts server-side tool invocations. On the wire these are
+	// nested under usage.server_tool_use, not top-level — verified against a
+	// captured result line (#23).
+	ServerToolUse ServerToolUse `json:"server_tool_use,omitempty"`
+
+	// ServiceTier is e.g. "standard".
+	ServiceTier string `json:"service_tier,omitempty"`
+}
+
+// ServerToolUse counts tool invocations the server performed on the model's
+// behalf, reported under a result's usage.server_tool_use.
+type ServerToolUse struct {
+	WebSearchRequests int `json:"web_search_requests,omitempty"`
+	WebFetchRequests  int `json:"web_fetch_requests,omitempty"`
 }
 
 // ModelUsage holds per-model token and cost breakdown.
+// ModelUsage is the per-model usage breakdown carried by a result's modelUsage
+// map. Its fields are camelCase on the wire — the CLI passes the value through
+// verbatim from its TypeScript shape — unlike the snake_case used everywhere
+// else in the protocol. Verified against a captured result line (#23).
 type ModelUsage struct {
-	InputTokens              int     `json:"input_tokens"`
-	OutputTokens             int     `json:"output_tokens"`
-	CacheReadInputTokens     int     `json:"cache_read_input_tokens"`
-	CacheCreationInputTokens int     `json:"cache_creation_input_tokens"`
-	CostUSD                  float64 `json:"cost_usd"`
-	ContextWindow            int     `json:"context_window,omitempty"`
-	MaxOutputTokens          int     `json:"max_output_tokens,omitempty"`
+	InputTokens              int     `json:"inputTokens"`
+	OutputTokens             int     `json:"outputTokens"`
+	CacheReadInputTokens     int     `json:"cacheReadInputTokens"`
+	CacheCreationInputTokens int     `json:"cacheCreationInputTokens"`
+	WebSearchRequests        int     `json:"webSearchRequests,omitempty"`
+	CostUSD                  float64 `json:"costUSD"`
+	ContextWindow            int     `json:"contextWindow,omitempty"`
+	MaxOutputTokens          int     `json:"maxOutputTokens,omitempty"`
+	// CanonicalModel is the model id without any suffix, e.g. "claude-haiku-4-5".
+	CanonicalModel string `json:"canonicalModel,omitempty"`
+	// Provider is e.g. "firstParty", "bedrock", "vertex".
+	Provider string `json:"provider,omitempty"`
 }
 
 // ─── Result message ────────────────────────────────────────────────────────────
@@ -171,7 +213,7 @@ type Result struct {
 	SessionID     string      `json:"session_id"`
 	UUID          string      `json:"uuid"`
 	// ModelUsages holds per-model token and cost breakdowns keyed by model ID.
-	ModelUsages map[string]ModelUsage `json:"model_usages,omitempty"`
+	ModelUsages map[string]ModelUsage `json:"modelUsage,omitempty"`
 	// Populated when IsError is true.
 	Errors []string `json:"errors,omitempty"`
 	// StructuredOutput holds parsed structured output when an OutputFormat
@@ -219,11 +261,11 @@ type SystemMessage struct {
 	APIKeySource      string   `json:"apiKeySource,omitempty"`
 
 	// Additional init fields populated by newer CLI versions.
-	Agents        []string `json:"agents,omitempty"`
-	Betas         []string `json:"betas,omitempty"`
-	Skills        []string `json:"skills,omitempty"`
-	Plugins       []string `json:"plugins,omitempty"`
-	SlashCommands []string `json:"slash_commands,omitempty"`
+	Agents        []string     `json:"agents,omitempty"`
+	Betas         []string     `json:"betas,omitempty"`
+	Skills        []string     `json:"skills,omitempty"`
+	Plugins       []PluginInfo `json:"plugins,omitempty"`
+	SlashCommands []string     `json:"slash_commands,omitempty"`
 }
 
 // ─── Tool progress message ────────────────────────────────────────────────────
@@ -267,4 +309,10 @@ type Event struct {
 	ToolProgress *ToolProgressMessage
 	Task         *TaskMessage
 	Raw          json.RawMessage
+
+	// DecodeErr records why a typed field decoded only partially, if it did.
+	// Typed fields are best-effort: on a type mismatch the fields that did
+	// decode are kept and this is set, rather than the whole message being
+	// discarded. Raw is always the authoritative payload.
+	DecodeErr error `json:"-"`
 }

@@ -1,0 +1,1 @@
+{"type": "system", "subtype": "background_tasks_changed", "tasks": [{"task_id": "a275cb849a094a305", "task_type": "local_agent", "description": "Explore files in /tmp"}], "uuid": "905d887e-ba6a-4599-b6db-7f2650cc4819", "session_id": "444ab599-bf97-449e-b605-84d578332059"}

@@ -3,6 +3,7 @@ package claude
 import (
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -26,9 +27,23 @@ func TestParseLine_Assistant(t *testing.T) {
 	}
 }
 
+// readMessageFixture loads one captured CLI line from testdata/messages.
+// These are real wire payloads, not hand-written literals — fabricated fixtures
+// are exactly how the defects this file now guards against reached main (#23).
+func readMessageFixture(t *testing.T, name string) []byte {
+	t.Helper()
+
+	line, err := os.ReadFile(filepath.Join("testdata", "messages", name))
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", name, err)
+	}
+	return line
+}
+
 func TestParseLine_Result(t *testing.T) {
-	line := `{"type":"result","subtype":"success","duration_ms":100,"is_error":false,"num_turns":1,"result":"done","total_cost_usd":0.01,"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"web_search_requests":3},"session_id":"s1","uuid":"u1"}`
-	event, err := parseLine([]byte(line))
+	line := readMessageFixture(t, "result_success.json")
+
+	event, err := parseLine(line)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -38,29 +53,84 @@ func TestParseLine_Result(t *testing.T) {
 	if event.Result == nil {
 		t.Fatal("expected Result to be non-nil")
 	}
-	if event.Result.Usage.WebSearchRequests != 3 {
-		t.Fatalf("expected WebSearchRequests=3, got %d", event.Result.Usage.WebSearchRequests)
+	if event.DecodeErr != nil {
+		t.Fatalf("captured result did not decode cleanly: %v", event.DecodeErr)
+	}
+
+	// server_tool_use is nested under usage on the wire, NOT top-level. The old
+	// fixture asserted a top-level web_search_requests the CLI never sends, so
+	// that field could never populate from real output. Assert the wire shape
+	// structurally: the captured counters happen to be zero, so comparing the
+	// decoded number alone would pass either way.
+	var wire struct {
+		Usage map[string]json.RawMessage `json:"usage"`
+	}
+	if err := json.Unmarshal(line, &wire); err != nil {
+		t.Fatalf("unmarshal captured usage: %v", err)
+	}
+	if _, topLevel := wire.Usage["web_search_requests"]; topLevel {
+		t.Error("captured usage has a top-level web_search_requests; revisit the nesting")
+	}
+	nested, ok := wire.Usage["server_tool_use"]
+	if !ok {
+		t.Fatal("captured usage has no server_tool_use object")
+	}
+	var counters map[string]int
+	if err := json.Unmarshal(nested, &counters); err != nil {
+		t.Fatalf("server_tool_use is not an object of counters: %v", err)
+	}
+	if _, has := counters["web_search_requests"]; !has {
+		t.Error("server_tool_use does not carry web_search_requests")
+	}
+	if event.Result.Usage.ServerToolUse.WebSearchRequests != counters["web_search_requests"] {
+		t.Errorf("ServerToolUse.WebSearchRequests = %d, wire says %d",
+			event.Result.Usage.ServerToolUse.WebSearchRequests, counters["web_search_requests"])
+	}
+	if event.Result.Usage.ServerToolUse.WebFetchRequests != counters["web_fetch_requests"] {
+		t.Errorf("ServerToolUse.WebFetchRequests = %d, wire says %d",
+			event.Result.Usage.ServerToolUse.WebFetchRequests, counters["web_fetch_requests"])
+	}
+	if event.Result.Usage.InputTokens == 0 || event.Result.Usage.CacheReadInputTokens == 0 {
+		t.Errorf("usage did not decode: %+v", event.Result.Usage)
+	}
+	if event.Result.Usage.ServiceTier == "" {
+		t.Error("service_tier did not decode")
+	}
+	if len(event.Raw) == 0 {
+		t.Error("Raw must stay populated on a fully decoded event")
 	}
 }
 
 func TestParseLine_ResultWithModelUsages(t *testing.T) {
-	line := `{"type":"result","subtype":"success","duration_ms":100,"is_error":false,"num_turns":1,"result":"done","total_cost_usd":0.05,"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"model_usages":{"claude-sonnet-4-6":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":0,"cost_usd":0.05,"context_window":200000,"max_output_tokens":8192}},"session_id":"s1","uuid":"u1"}`
-	event, err := parseLine([]byte(line))
+	line := readMessageFixture(t, "result_success.json")
+
+	event, err := parseLine(line)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if event.Result == nil {
 		t.Fatal("expected Result to be non-nil")
 	}
-	mu, ok := event.Result.ModelUsages["claude-sonnet-4-6"]
-	if !ok {
-		t.Fatal("expected model usage for claude-sonnet-4-6")
+
+	// The wire key is modelUsage, and its fields are camelCase — unlike the rest
+	// of the protocol. The old fixture used model_usages with snake_case, which
+	// the CLI never emits, so this map was always empty against real output.
+	if len(event.Result.ModelUsages) == 0 {
+		t.Fatal("modelUsage did not decode")
 	}
-	if mu.CostUSD != 0.05 {
-		t.Fatalf("expected CostUSD=0.05, got %f", mu.CostUSD)
-	}
-	if mu.ContextWindow != 200000 {
-		t.Fatalf("expected ContextWindow=200000, got %d", mu.ContextWindow)
+	for model, mu := range event.Result.ModelUsages {
+		if mu.InputTokens == 0 && mu.OutputTokens == 0 {
+			t.Errorf("%s: token counts did not decode: %+v", model, mu)
+		}
+		if mu.CostUSD == 0 {
+			t.Errorf("%s: costUSD did not decode: %+v", model, mu)
+		}
+		if mu.ContextWindow == 0 {
+			t.Errorf("%s: contextWindow did not decode: %+v", model, mu)
+		}
+		if mu.CanonicalModel == "" {
+			t.Errorf("%s: canonicalModel did not decode: %+v", model, mu)
+		}
 	}
 }
 
@@ -87,48 +157,85 @@ func TestParseLine_ToolProgress(t *testing.T) {
 	}
 }
 
-func TestParseLine_TaskStarted(t *testing.T) {
-	line := `{"type":"task_started","task_id":"t1","status":"running","message":"starting"}`
-	event, err := parseLine([]byte(line))
+// Task lifecycle messages arrive as system subtypes. The old tests fed lines
+// with type:"task_started", which nothing on the wire ever sends — so they
+// exercised a branch that could not fire in production.
+func TestParseLine_TaskStartedIsASystemSubtype(t *testing.T) {
+	line := readMessageFixture(t, "system_task_started.json")
+
+	event, err := parseLine(line)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if event.Type != TypeTaskStarted {
-		t.Fatalf("expected type %q, got %q", TypeTaskStarted, event.Type)
+	if event.Type != TypeSystem {
+		t.Fatalf("expected type %q, got %q", TypeSystem, event.Type)
+	}
+	if event.System == nil || event.System.Subtype != SubtypeTaskStarted {
+		t.Fatalf("expected a system/%s message, got %+v", SubtypeTaskStarted, event.System)
 	}
 	if event.Task == nil {
-		t.Fatal("expected Task to be non-nil")
+		t.Fatal("expected Task to be populated from the system subtype")
 	}
-	if event.Task.TaskID != "t1" {
-		t.Fatalf("expected task_id %q, got %q", "t1", event.Task.TaskID)
+	if event.Task.TaskID == "" {
+		t.Errorf("task_id did not decode: %+v", event.Task)
 	}
 }
 
-func TestParseLine_TaskProgress(t *testing.T) {
-	line := `{"type":"task_progress","task_id":"t1","message":"50%"}`
-	event, err := parseLine([]byte(line))
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if event.Type != TypeTaskProgress {
-		t.Fatalf("expected type %q, got %q", TypeTaskProgress, event.Type)
-	}
-	if event.Task == nil {
-		t.Fatal("expected Task to be non-nil")
+// The other system subtypes seen while capturing the corpus decode as system
+// messages and keep Raw, even though their payloads are not typed yet.
+func TestParseLine_OtherSystemSubtypes(t *testing.T) {
+	for _, tc := range []struct {
+		fixture string
+		subtype string
+	}{
+		{"system_thinking_tokens.json", SubtypeThinkingTokens},
+		{"system_background_tasks_changed.json", SubtypeBackgroundTasksChange},
+	} {
+		t.Run(tc.subtype, func(t *testing.T) {
+			event, err := parseLine(readMessageFixture(t, tc.fixture))
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if event.System == nil || event.System.Subtype != tc.subtype {
+				t.Fatalf("expected system/%s, got %+v", tc.subtype, event.System)
+			}
+			if len(event.Raw) == 0 {
+				t.Error("Raw must be populated")
+			}
+		})
 	}
 }
 
-func TestParseLine_TaskNotification(t *testing.T) {
-	line := `{"type":"task_notification","task_id":"t1","message":"done"}`
-	event, err := parseLine([]byte(line))
+// A system/init from a session with plugins loaded must decode. Before #23
+// Plugins was []string while the wire carries objects, so the type mismatch
+// nilled the entire SystemMessage.
+func TestParseLine_SystemInitWithPlugins(t *testing.T) {
+	line := readMessageFixture(t, "system_init_with_plugins.json")
+
+	event, err := parseLine(line)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if event.Type != TypeTaskNotification {
-		t.Fatalf("expected type %q, got %q", TypeTaskNotification, event.Type)
+	if event.System == nil {
+		t.Fatal("expected System to be non-nil")
 	}
-	if event.Task == nil {
-		t.Fatal("expected Task to be non-nil")
+	if event.DecodeErr != nil {
+		t.Fatalf("captured init did not decode cleanly: %v", event.DecodeErr)
+	}
+	if event.System.Subtype != SubtypeInit {
+		t.Fatalf("expected subtype %q, got %q", SubtypeInit, event.System.Subtype)
+	}
+	if len(event.System.Plugins) == 0 {
+		t.Fatal("plugins did not decode")
+	}
+	for _, pl := range event.System.Plugins {
+		if pl.Name == "" || pl.Path == "" {
+			t.Errorf("plugin decoded with empty fields: %+v", pl)
+		}
+	}
+	// Other init fields must survive alongside the plugins.
+	if event.System.SessionID == "" {
+		t.Error("session_id did not decode")
 	}
 }
 
@@ -199,11 +306,10 @@ func TestParseLine_InvalidJSON(t *testing.T) {
 
 func TestParseLine_NewTypesRawOnly(t *testing.T) {
 	// Types declared as constants but not parsed into typed fields should
-	// still have Type set and Raw populated.
+	// still have Type set and Raw populated. The task/hook lifecycle names are
+	// deliberately absent: they are system subtypes, not top-level types (#23).
 	types := []MessageType{
-		TypeToolUseSummary, TypeHookStarted, TypeHookProgress,
-		TypeHookResponse, TypeCompactBoundary, TypeFilesPersisted,
-		TypeAuthStatus, TypePromptSuggestion,
+		TypeToolUseSummary, TypeAuthStatus, TypePromptSuggestion, TypeRateLimitEvent,
 	}
 	for _, typ := range types {
 		line, _ := json.Marshal(map[string]any{"type": string(typ), "data": "test"})
@@ -214,15 +320,12 @@ func TestParseLine_NewTypesRawOnly(t *testing.T) {
 		if event.Type != typ {
 			t.Fatalf("expected type %q, got %q", typ, event.Type)
 		}
-		if event.Raw == nil {
-			t.Fatalf("expected Raw to be non-nil for type %q", typ)
+		if len(event.Raw) == 0 {
+			t.Fatalf("expected Raw to be populated for type %q", typ)
 		}
 	}
 }
 
-// permission_denials is an array of objects, not strings. Typing it as []string
-// made the whole result message fail to decode the moment a tool was actually
-// denied — which only became reachable once the can_use_tool route worked (#17).
 func TestParseLine_ResultWithPermissionDenials(t *testing.T) {
 	line, err := os.ReadFile("testdata/result_with_permission_denials.json")
 	if err != nil {
