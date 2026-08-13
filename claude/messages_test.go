@@ -624,10 +624,10 @@ func readStreamSequence(t *testing.T) [][]byte {
 // fragments split mid-string, so this only works if every one is preserved.
 func TestStreamEvent_InputJSONAccumulation(t *testing.T) {
 	var (
-		toolName  string
-		toolID    string
-		accumated = map[int]string{}
-		blockIdx  = -1
+		toolName    string
+		toolID      string
+		accumulated = map[int]string{}
+		blockIdx    = -1
 	)
 
 	for _, line := range readStreamSequence(t) {
@@ -644,7 +644,7 @@ func TestStreamEvent_InputJSONAccumulation(t *testing.T) {
 			toolName, toolID, blockIdx = block.Name, block.ID, ev.Index
 		}
 		if fragment, ok := ev.PartialJSON(); ok {
-			accumated[ev.Index] += fragment
+			accumulated[ev.Index] += fragment
 		}
 	}
 
@@ -655,7 +655,7 @@ func TestStreamEvent_InputJSONAccumulation(t *testing.T) {
 		t.Fatal("no tool_use block was started")
 	}
 
-	assembled := accumated[blockIdx]
+	assembled := accumulated[blockIdx]
 	if assembled == "" {
 		t.Fatal("no input_json_delta fragments were accumulated")
 	}
@@ -768,5 +768,24 @@ func TestStreamEvent_RawPreserved(t *testing.T) {
 		if decoded["type"] != ev.Type {
 			t.Errorf("Raw holds a different event: %v vs %q", decoded["type"], ev.Type)
 		}
+	}
+}
+
+// Go unmarshals JSON null into a string as a no-op, so the bare-string branch
+// would quietly turn absent content into one empty text block. Absent content
+// must stay absent — this is the same trap that admitted empty ids in #18.
+func TestContentBlocks_NullIsNotAnEmptyTextBlock(t *testing.T) {
+	line := []byte(`{"type":"user","message":{"role":"user","content":null},
+		"session_id":"s","uuid":"u"}`)
+
+	event, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if event.User == nil {
+		t.Fatal("Event.User is nil")
+	}
+	if blocks := event.User.Message.Content; len(blocks) != 0 {
+		t.Errorf("null content must decode to no blocks, got %+v", blocks)
 	}
 }

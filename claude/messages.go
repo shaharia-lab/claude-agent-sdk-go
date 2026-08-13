@@ -4,7 +4,10 @@
 // of @anthropic-ai/claude-agent-sdk.
 package claude
 
-import "encoding/json"
+import (
+	"bytes"
+	"encoding/json"
+)
 
 // MessageType is the discriminant field present on every message.
 type MessageType string
@@ -176,6 +179,14 @@ type ContentBlocks []ContentBlock
 
 // UnmarshalJSON accepts both the array and the bare-string form.
 func (c *ContentBlocks) UnmarshalJSON(data []byte) error {
+	// Check for null first: Go unmarshals JSON null into a string as a no-op,
+	// so the string branch below would silently turn absent content into one
+	// empty text block rather than no content at all.
+	if bytes.Equal(bytes.TrimSpace(data), []byte("null")) {
+		*c = nil
+		return nil
+	}
+
 	var s string
 	if err := json.Unmarshal(data, &s); err == nil {
 		*c = ContentBlocks{{Type: BlockText, Text: s, Raw: append(json.RawMessage(nil), data...)}}
@@ -220,6 +231,15 @@ type MessagePayload struct {
 	StopSequence *string         `json:"stop_sequence,omitempty"`
 	StopDetails  json.RawMessage `json:"stop_details,omitempty"`
 
+	// Error classifies a failed turn; empty on success.
+	//
+	// Placement is inferred, not captured: no session available here produced a
+	// failed turn, and the official Python SDK flattens the whole `message`
+	// object onto its own type, so its top-level `error` most likely sits beside
+	// the other fields here. If a future capture proves otherwise this field
+	// stays empty — read Event.Raw when it matters.
+	Error AssistantMessageError `json:"error,omitempty"`
+
 	// Usage is this turn's token counts, kept raw because the CLI nests
 	// provider-specific detail under it (cache_creation, inference_geo, …) that
 	// changes independently of this SDK.
@@ -243,8 +263,6 @@ type AssistantMessage struct {
 	Timestamp string `json:"timestamp,omitempty"`
 	// RequestID is the upstream API request id, e.g. "req_011Cdz…".
 	RequestID string `json:"request_id,omitempty"`
-	// Error classifies a failed turn; empty on success.
-	Error AssistantMessageError `json:"error,omitempty"`
 }
 
 // Text returns the concatenated text from all text content blocks.
