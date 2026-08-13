@@ -121,3 +121,57 @@ func TestRun_UndecodableResultDoesNotPanic(t *testing.T) {
 		t.Fatalf("expected a decode error, got: %v", err)
 	}
 }
+
+// Run() returns only an error on a failed result, so whatever a caller needs to
+// react to the failure has to be in the message — otherwise they must drop to
+// Query() just to read why it stopped (#28).
+func TestRun_ErrorSurfacesTerminalReasonAndStatus(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+		want []string
+	}{
+		{
+			name: "interrupted turn",
+			line: `{"type":"result","subtype":"error_during_execution","is_error":true,
+				"terminal_reason":"aborted_streaming"}`,
+			want: []string{"error_during_execution", "aborted_streaming"},
+		},
+		{
+			name: "rate limited",
+			line: `{"type":"result","subtype":"success","is_error":true,
+				"terminal_reason":"api_error","api_error_status":429}`,
+			want: []string{"api_error", "HTTP 429"},
+		},
+		{
+			name: "turn limit with errors list",
+			line: `{"type":"result","subtype":"error_max_turns","is_error":true,
+				"terminal_reason":"max_turns","errors":["ran out of turns"]}`,
+			want: []string{"error_max_turns", "max_turns", "ran out of turns"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			event, err := parseLine([]byte(tc.line))
+			if err != nil {
+				t.Fatalf("parseLine: %v", err)
+			}
+
+			events := make(chan Event, 1)
+			events <- event
+			close(events)
+
+			result, err := resultFromStream(&Stream{events: events, ctx: context.Background()})
+			if err == nil {
+				t.Fatal("expected an error for a failed result")
+			}
+			if result != nil {
+				t.Fatal("expected no result alongside the error")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error must mention %q; got: %v", want, err)
+				}
+			}
+		})
+	}
+}

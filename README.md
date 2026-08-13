@@ -227,6 +227,40 @@ message. Per-model usage lives in `Result.ModelUsages` (wire key `modelUsage`,
 camelCase fields), and server-side tool counters are under
 `Result.Usage.ServerToolUse`.
 
+### Reacting to how a run ended
+
+`Result.Subtype` is not enough to branch on: an interrupted turn and an ordinary
+execution failure both report `error_during_execution`. `TerminalReason` is what
+separates them.
+
+| Field | Use it to |
+| --- | --- |
+| `TerminalReason` | Tell *why* the loop stopped — `TerminalCompleted`, `TerminalMaxTurns`, `TerminalAbortedStreaming`/`TerminalAbortedTools` (cancelled), `TerminalAPIError`, `TerminalBudgetExhausted`, … |
+| `TerminalReason.Aborted()` | Shortcut for "the caller cancelled this" |
+| `APIErrorStatus` | Classify an upstream failure for retry: `429` back off, `529` retry, `500` retry once. `nil` when the CLI sent none |
+| `DeferredToolUse` | Inspect the call a `PreToolUse` hook deferred, and decide whether to resume |
+| `ModelUsages[m].CanonicalModel` / `.Provider` | Attribute cost to a model and provider (`ProviderFirstParty`, `ProviderBedrock`, …) |
+
+```go
+result, err := claude.Run(ctx, prompt, opts...)
+if err != nil {
+    // Run()'s error already names the subtype, terminal reason and HTTP status.
+    return err
+}
+
+switch {
+case result.TerminalReason.Aborted():
+    log.Print("cancelled by the caller")
+case result.APIErrorStatus != nil && *result.APIErrorStatus == 429:
+    // back off and retry
+case result.TerminalReason == claude.TerminalMaxTurns:
+    // raise WithMaxTurns, or accept the partial answer
+}
+```
+
+`TerminalReason` is a named string, not a closed enum — a reason this SDK does
+not know yet decodes through unchanged rather than being dropped.
+
 ### What the connected CLI supports
 
 The SDK completes an `initialize` handshake with the CLI before the first turn

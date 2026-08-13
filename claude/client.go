@@ -365,6 +365,27 @@ func Run(ctx context.Context, prompt string, opts ...Option) (*Result, error) {
 	return resultFromStream(stream)
 }
 
+// resultError renders a failed result as a Go error, surfacing the fields a
+// caller would otherwise have to reach for Query() to see: why the loop ended,
+// and the HTTP status when an upstream call was what failed.
+func resultError(r *Result) error {
+	var detail strings.Builder
+	detail.WriteString(r.Subtype)
+	if r.TerminalReason != "" {
+		fmt.Fprintf(&detail, ", %s", r.TerminalReason)
+	}
+	if r.APIErrorStatus != nil {
+		fmt.Fprintf(&detail, ", HTTP %d", *r.APIErrorStatus)
+	}
+
+	// The CLI does not always send an errors list; repeating the subtype as the
+	// message when it doesn't adds nothing the detail above hasn't said.
+	if len(r.Errors) == 0 {
+		return fmt.Errorf("claude: agent error (%s)", detail.String())
+	}
+	return fmt.Errorf("claude: agent error (%s): %s", detail.String(), strings.Join(r.Errors, "; "))
+}
+
 // resultFromStream drains a stream and returns its final result, converting
 // error results and process-level failures into Go errors.
 func resultFromStream(stream *Stream) (*Result, error) {
@@ -381,11 +402,7 @@ func resultFromStream(stream *Stream) (*Result, error) {
 					truncate(string(event.Raw), 512))
 			}
 			if r.IsError {
-				msg := r.Subtype
-				if len(r.Errors) > 0 {
-					msg = strings.Join(r.Errors, "; ")
-				}
-				return nil, fmt.Errorf("claude: agent error (%s): %s", r.Subtype, msg)
+				return nil, resultError(r)
 			}
 			return r, nil
 
