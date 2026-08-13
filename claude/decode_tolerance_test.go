@@ -1,6 +1,7 @@
 package claude
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -67,21 +68,36 @@ func TestParseLine_RawAlwaysPopulated(t *testing.T) {
 
 	for _, e := range entries {
 		t.Run(e.Name(), func(t *testing.T) {
-			line := readMessageFixture(t, e.Name())
+			// Corpus files hold one message each, except *.jsonl, which holds an
+			// ordered sequence of them (one streamed turn). Both are real captured
+			// lines and both must decode.
+			content := readMessageFixture(t, e.Name())
 
-			event, err := parseLine(line)
-			if err != nil {
-				t.Fatalf("parseLine: %v", err)
+			lines := [][]byte{content}
+			if filepath.Ext(e.Name()) == ".jsonl" {
+				lines = nil
+				for _, l := range bytes.Split(bytes.TrimSpace(content), []byte("\n")) {
+					if len(bytes.TrimSpace(l)) > 0 {
+						lines = append(lines, l)
+					}
+				}
 			}
-			if len(event.Raw) == 0 {
-				t.Error("Raw is empty")
-			}
-			if event.Type == "" {
-				t.Error("Type did not decode")
-			}
-			// Nothing in a corpus captured from a real CLI should decode partially.
-			if event.DecodeErr != nil {
-				t.Errorf("captured line did not decode cleanly: %v", event.DecodeErr)
+
+			for i, line := range lines {
+				event, err := parseLine(line)
+				if err != nil {
+					t.Fatalf("line %d: parseLine: %v", i, err)
+				}
+				if len(event.Raw) == 0 {
+					t.Errorf("line %d: Raw is empty", i)
+				}
+				if event.Type == "" {
+					t.Errorf("line %d: Type did not decode", i)
+				}
+				// Nothing in a corpus captured from a real CLI should decode partially.
+				if event.DecodeErr != nil {
+					t.Errorf("line %d: captured line did not decode cleanly: %v", i, event.DecodeErr)
+				}
 			}
 		})
 	}

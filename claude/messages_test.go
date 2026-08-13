@@ -1,9 +1,12 @@
 package claude
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -362,5 +365,408 @@ func TestParseLine_ResultWithPermissionDenials(t *testing.T) {
 	}
 	if denials[1].ToolName != "Bash" {
 		t.Fatalf("expected second denial for Bash, got %q", denials[1].ToolName)
+	}
+}
+
+// ─── User messages and the content-block union (#27) ──────────────────────────
+
+// The user side of a conversation is where every tool's output arrives. Before
+// #27 parseLine had no "user" case at all, so all of it was invisible to typed
+// consumers.
+func TestParseLine_UserMessageWithToolResult(t *testing.T) {
+	line := readMessageFixture(t, "user_tool_result.json")
+
+	event, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if event.Type != TypeUser {
+		t.Fatalf("expected type %q, got %q", TypeUser, event.Type)
+	}
+	if event.User == nil {
+		t.Fatal("Event.User is nil — the captured user turn failed to decode")
+	}
+	if event.DecodeErr != nil {
+		t.Fatalf("captured payload should decode cleanly: %v", event.DecodeErr)
+	}
+
+	results := event.User.ToolResults()
+	if len(results) != 1 {
+		t.Fatalf("expected 1 tool_result block, got %d", len(results))
+	}
+	got := results[0]
+	if got.ToolUseID != "toolu_014V681DGmsapzsqS82K773b" {
+		t.Errorf("unexpected tool_use_id %q", got.ToolUseID)
+	}
+	if got.Failed() {
+		t.Error("this result succeeded; Failed() must be false when is_error is absent")
+	}
+	text, ok := got.ContentText()
+	if !ok {
+		t.Fatal("this tool sent its content as a string; ContentText must report it")
+	}
+	if !strings.Contains(text, "hello-from-corpus") {
+		t.Errorf("tool output was lost: %q", text)
+	}
+
+	// tool_use_result is the tool's own structured payload — an object here.
+	var structured map[string]any
+	if err := json.Unmarshal(event.User.ToolUseResult, &structured); err != nil {
+		t.Fatalf("tool_use_result should be preserved as raw JSON: %v", err)
+	}
+	if structured["type"] != "text" {
+		t.Errorf("unexpected tool_use_result %v", structured)
+	}
+	if event.User.SessionID == "" || event.User.UUID == "" {
+		t.Error("session_id/uuid were lost")
+	}
+}
+
+// The same field is a plain string when the tool fails, which is why
+// ToolUseResult is raw rather than a typed struct.
+func TestParseLine_UserToolResultError(t *testing.T) {
+	line := readMessageFixture(t, "user_tool_result_error.json")
+
+	event, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if event.User == nil {
+		t.Fatal("Event.User is nil")
+	}
+	if event.DecodeErr != nil {
+		t.Fatalf("captured payload should decode cleanly: %v", event.DecodeErr)
+	}
+
+	results := event.User.ToolResults()
+	if len(results) != 1 {
+		t.Fatalf("expected 1 tool_result block, got %d", len(results))
+	}
+	if !results[0].Failed() {
+		t.Error("is_error was true on the wire; Failed() must report it")
+	}
+
+	var s string
+	if err := json.Unmarshal(event.User.ToolUseResult, &s); err != nil {
+		t.Fatalf("tool_use_result arrives as a bare string when a tool fails: %v", err)
+	}
+	if !strings.Contains(s, "does not exist") {
+		t.Errorf("unexpected tool_use_result %q", s)
+	}
+}
+
+// Assistant turns carry the model, stop reason and per-turn usage that
+// MessagePayload used to drop on the floor.
+func TestParseLine_AssistantToolUseMetadata(t *testing.T) {
+	line := readMessageFixture(t, "assistant_tool_use.json")
+
+	event, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if event.Assistant == nil {
+		t.Fatal("Event.Assistant is nil")
+	}
+	if event.DecodeErr != nil {
+		t.Fatalf("captured payload should decode cleanly: %v", event.DecodeErr)
+	}
+
+	msg := event.Assistant.Message
+	if msg.ID != "msg_011Cdzm9PJgJPQp5eEUJsQDL" {
+		t.Errorf("message id was lost: %q", msg.ID)
+	}
+	if msg.Model != "claude-opus-5" {
+		t.Errorf("model was lost: %q", msg.Model)
+	}
+	if len(msg.Usage) == 0 {
+		t.Error("per-turn usage was lost")
+	}
+	if event.Assistant.RequestID == "" {
+		t.Error("request_id was lost")
+	}
+
+	uses := event.Assistant.ToolUses()
+	if len(uses) != 1 {
+		t.Fatalf("expected 1 tool_use block, got %d", len(uses))
+	}
+	if uses[0].Name != "Read" || uses[0].ID == "" {
+		t.Errorf("tool_use id/name were lost: %+v", uses[0])
+	}
+	var input map[string]any
+	if err := json.Unmarshal(uses[0].Input, &input); err != nil {
+		t.Fatalf("tool input should be preserved as raw JSON: %v", err)
+	}
+	if input["file_path"] == "" {
+		t.Errorf("tool input was lost: %v", input)
+	}
+	if len(uses[0].Caller) == 0 {
+		t.Error("caller was dropped; the CLI sends one on every tool_use block")
+	}
+}
+
+// The pairing that makes a transcript renderable: every tool_use on the
+// assistant side has a matching tool_result on the following user turn.
+func TestToolUseResultsPairByID(t *testing.T) {
+	assistantEvent, err := parseLine(readMessageFixture(t, "assistant_tool_use.json"))
+	if err != nil {
+		t.Fatalf("parseLine assistant: %v", err)
+	}
+	userEvent, err := parseLine(readMessageFixture(t, "user_tool_result.json"))
+	if err != nil {
+		t.Fatalf("parseLine user: %v", err)
+	}
+
+	resultIDs := make(map[string]bool)
+	for _, r := range userEvent.User.ToolResults() {
+		resultIDs[r.ToolUseID] = true
+	}
+
+	uses := assistantEvent.Assistant.ToolUses()
+	if len(uses) == 0 {
+		t.Fatal("no tool_use blocks to pair")
+	}
+	for _, u := range uses {
+		if !resultIDs[u.ID] {
+			t.Errorf("tool_use %q has no matching tool_result; ids are %v", u.ID, resultIDs)
+		}
+	}
+}
+
+// A block type this SDK has never seen must survive as Type + Raw rather than
+// being dropped, and must not damage the blocks around it.
+func TestContentBlock_UnknownTypePreserved(t *testing.T) {
+	line := []byte(`{"type":"assistant","message":{"role":"assistant","content":[
+		{"type":"text","text":"before"},
+		{"type":"telepathy_block","waves":42,"nested":{"a":1}},
+		{"type":"text","text":"after"}
+	]},"session_id":"s","uuid":"u"}`)
+
+	event, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if event.Assistant == nil {
+		t.Fatal("an unknown block nilled the whole message")
+	}
+
+	blocks := event.Assistant.Message.Content
+	if len(blocks) != 3 {
+		t.Fatalf("expected 3 blocks, got %d", len(blocks))
+	}
+	if blocks[1].Type != "telepathy_block" {
+		t.Errorf("unknown block type was lost: %q", blocks[1].Type)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(blocks[1].Raw, &raw); err != nil {
+		t.Fatalf("unknown block must keep its payload in Raw: %v", err)
+	}
+	if raw["waves"] != float64(42) {
+		t.Errorf("unknown block payload was lost: %v", raw)
+	}
+	if event.Assistant.Text() != "beforeafter" {
+		t.Errorf("surrounding text blocks were damaged: %q", event.Assistant.Text())
+	}
+}
+
+// Content is an array of blocks on everything the CLI originates, but a bare
+// string on what this SDK sends and what transcripts replay. Both must decode.
+func TestContentBlocks_AcceptsBareString(t *testing.T) {
+	line := []byte(`{"type":"user","message":{"role":"user","content":"just text"},
+		"session_id":"s","uuid":"u"}`)
+
+	event, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if event.User == nil {
+		t.Fatal("Event.User is nil for a string-content user turn")
+	}
+	if event.DecodeErr != nil {
+		t.Fatalf("string content is a valid wire shape, not a decode error: %v", event.DecodeErr)
+	}
+
+	blocks := event.User.Message.Content
+	if len(blocks) != 1 || blocks[0].Type != BlockText {
+		t.Fatalf("a bare string should become one text block, got %+v", blocks)
+	}
+	if event.User.Text() != "just text" {
+		t.Errorf("text was lost: %q", event.User.Text())
+	}
+}
+
+// ─── stream_event passthrough (#27) ───────────────────────────────────────────
+
+// readStreamSequence returns the captured stream_event lines of one assistant
+// turn, in arrival order.
+func readStreamSequence(t *testing.T) [][]byte {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join("testdata", "messages", "stream_tool_use_sequence.jsonl"))
+	if err != nil {
+		t.Fatalf("read stream sequence: %v", err)
+	}
+
+	var lines [][]byte
+	for _, l := range bytes.Split(bytes.TrimSpace(data), []byte("\n")) {
+		if len(bytes.TrimSpace(l)) > 0 {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) == 0 {
+		t.Fatal("stream sequence fixture is empty")
+	}
+	return lines
+}
+
+// The point of streaming a tool call: reassembling input_json_delta fragments
+// yields exactly the input the non-streaming assistant message reports. The
+// fragments split mid-string, so this only works if every one is preserved.
+func TestStreamEvent_InputJSONAccumulation(t *testing.T) {
+	var (
+		toolName  string
+		toolID    string
+		accumated = map[int]string{}
+		blockIdx  = -1
+	)
+
+	for _, line := range readStreamSequence(t) {
+		event, err := parseLine(line)
+		if err != nil {
+			t.Fatalf("parseLine: %v", err)
+		}
+		if event.StreamEvent == nil {
+			t.Fatal("Event.StreamEvent is nil")
+		}
+		ev := event.StreamEvent.Event
+
+		if block, ok := ev.ContentBlockStart(); ok && block.Type == BlockToolUse {
+			toolName, toolID, blockIdx = block.Name, block.ID, ev.Index
+		}
+		if fragment, ok := ev.PartialJSON(); ok {
+			accumated[ev.Index] += fragment
+		}
+	}
+
+	if toolName != "Read" || toolID == "" {
+		t.Fatalf("content_block_start did not announce the tool: name=%q id=%q", toolName, toolID)
+	}
+	if blockIdx < 0 {
+		t.Fatal("no tool_use block was started")
+	}
+
+	assembled := accumated[blockIdx]
+	if assembled == "" {
+		t.Fatal("no input_json_delta fragments were accumulated")
+	}
+
+	// Compare semantically: the streamed fragments carry the model's own
+	// whitespace, the assembled assistant message does not.
+	var streamed, complete map[string]any
+	if err := json.Unmarshal([]byte(assembled), &streamed); err != nil {
+		t.Fatalf("accumulated fragments are not valid JSON (%q): %v", assembled, err)
+	}
+
+	assistantEvent, err := parseLine(readMessageFixture(t, "assistant_tool_use.json"))
+	if err != nil {
+		t.Fatalf("parseLine assistant: %v", err)
+	}
+	if err := json.Unmarshal(assistantEvent.Assistant.ToolUses()[0].Input, &complete); err != nil {
+		t.Fatalf("unmarshal complete input: %v", err)
+	}
+
+	if !reflect.DeepEqual(streamed, complete) {
+		t.Errorf("streamed input %v != complete input %v", streamed, complete)
+	}
+}
+
+// The tail of a turn — why it stopped and what it cost — rides message_delta,
+// with usage as a sibling of delta rather than inside it.
+func TestStreamEvent_MessageDeltaTail(t *testing.T) {
+	var seen bool
+
+	for _, line := range readStreamSequence(t) {
+		event, err := parseLine(line)
+		if err != nil {
+			t.Fatalf("parseLine: %v", err)
+		}
+
+		stopReason, usage, ok := event.StreamEvent.Event.MessageDelta()
+		if !ok {
+			continue
+		}
+		seen = true
+
+		if stopReason != "tool_use" {
+			t.Errorf("expected stop_reason tool_use, got %q", stopReason)
+		}
+		if len(usage) == 0 {
+			t.Fatal("message_delta usage was dropped")
+		}
+		var u map[string]any
+		if err := json.Unmarshal(usage, &u); err != nil {
+			t.Fatalf("usage should be preserved as raw JSON: %v", err)
+		}
+		if u["output_tokens"] == nil {
+			t.Errorf("usage lost its token counts: %v", u)
+		}
+	}
+
+	if !seen {
+		t.Fatal("the sequence contains a message_delta but MessageDelta() never matched")
+	}
+}
+
+// Text streaming must keep working exactly as before — this is the path every
+// current caller of Delta.Text is on.
+func TestStreamEvent_TextDeltaStillWorks(t *testing.T) {
+	var viaField, viaAccessor string
+
+	for _, line := range readStreamSequence(t) {
+		event, err := parseLine(line)
+		if err != nil {
+			t.Fatalf("parseLine: %v", err)
+		}
+		ev := event.StreamEvent.Event
+
+		if ev.Delta != nil {
+			viaField += ev.Delta.Text
+		}
+		if text, ok := ev.TextDelta(); ok {
+			viaAccessor += text
+		}
+	}
+
+	if viaField == "" {
+		t.Fatal("Delta.Text no longer accumulates; existing callers would break")
+	}
+	if viaField != viaAccessor {
+		t.Errorf("accessor disagrees with the field: %q vs %q", viaAccessor, viaField)
+	}
+	if !strings.Contains(viaField, "read the file") {
+		t.Errorf("streamed text was lost: %q", viaField)
+	}
+}
+
+// Every stream event keeps its verbatim payload, so a field this struct does
+// not model is still reachable.
+func TestStreamEvent_RawPreserved(t *testing.T) {
+	for _, line := range readStreamSequence(t) {
+		event, err := parseLine(line)
+		if err != nil {
+			t.Fatalf("parseLine: %v", err)
+		}
+		ev := event.StreamEvent.Event
+
+		if len(ev.Raw) == 0 {
+			t.Fatalf("StreamEvent.Raw is empty for a %q event", ev.Type)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(ev.Raw, &decoded); err != nil {
+			t.Fatalf("Raw is not the event payload: %v", err)
+		}
+		if decoded["type"] != ev.Type {
+			t.Errorf("Raw holds a different event: %v vs %q", decoded["type"], ev.Type)
+		}
 	}
 }

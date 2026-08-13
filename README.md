@@ -115,6 +115,83 @@ r2, err := claude.Run(ctx, "What is my name?",
 )
 ```
 
+### Message types
+
+Every line the CLI sends decodes into an `Event`. `Event.Type` is always set;
+the matching typed field is non-nil for the types below, and anything else
+carries `Event.Raw` alone.
+
+| `Event.Type` | Field | What it carries |
+| --- | --- | --- |
+| `TypeAssistant` | `Assistant` | A complete assistant turn: content blocks, `Message.Model`, `Message.StopReason`, per-turn `Message.Usage` |
+| `TypeUser` | `User` | The user side — usually the CLI delivering a tool's output as `tool_result` blocks, not something a human typed |
+| `TypeStreamEvent` | `StreamEvent` | One incremental event of a streamed turn (needs `WithIncludePartialMessages()`) |
+| `TypeResult` | `Result` | The final message: cost, cumulative `ModelUsages`, permission denials |
+| `TypeSystem` | `System` | Session lifecycle. Task and hook events arrive here as **subtypes**; task subtypes also populate `Task` |
+| `TypeToolProgress` | `ToolProgress` | Incremental progress from a running tool |
+| `TypeRateLimitEvent` | — | `Raw` only |
+
+A message's `Content` is a `[]ContentBlock` — one struct with a `Type`
+discriminator covering the whole union, so unknown block types degrade to
+`Type` + `Raw` rather than being dropped:
+
+| `Block.Type` | Populated fields |
+| --- | --- |
+| `BlockText` | `Text` |
+| `BlockThinking` | `Thinking`, `Signature` |
+| `BlockToolUse`, `BlockServerToolUse` | `ID`, `Name`, `Input`, `Caller` |
+| `BlockToolResult` and the server-side result blocks | `ToolUseID`, `Content`, `IsError` |
+
+Pair a turn's `Assistant.ToolUses()` to the next `User.ToolResults()` by
+`ToolUseID`:
+
+```go
+for ev := range stream.Events() {
+    switch ev.Type {
+    case claude.TypeAssistant:
+        for _, use := range ev.Assistant.ToolUses() {
+            fmt.Printf("calling %s(%s)\n", use.Name, use.Input)
+        }
+    case claude.TypeUser:
+        for _, res := range ev.User.ToolResults() {
+            text, _ := res.ContentText()   // Content is a string or a block array
+            fmt.Printf("%s → %s (failed=%v)\n", res.ToolUseID, text, res.Failed())
+        }
+    }
+}
+```
+
+> **`usage` vs `modelUsage`.** `Assistant.Message.Usage` is **per-turn** usage
+> for one call of the main loop — it is *not* the cost-accounting field. Totals
+> and cost live on the result, in `Result.ModelUsages` (wire key `modelUsage`)
+> and `Result.TotalCostUSD`.
+
+### Streaming a tool call
+
+With `WithIncludePartialMessages()`, a tool call arrives in pieces: a
+`content_block_start` announcing its name and id, then `input_json_delta`
+fragments carrying the arguments. Fragments split at arbitrary points — even
+mid-string — so they are valid JSON only once concatenated:
+
+```go
+inputs := map[int]*strings.Builder{}
+
+e := ev.StreamEvent.Event
+if block, ok := e.ContentBlockStart(); ok && block.Type == claude.BlockToolUse {
+    inputs[e.Index] = &strings.Builder{}          // tool announced: block.Name, block.ID
+}
+if fragment, ok := e.PartialJSON(); ok {
+    inputs[e.Index].WriteString(fragment)         // one slice of the arguments
+}
+if stopReason, usage, ok := e.MessageDelta(); ok {
+    // end of the turn — usage rides the event, not the delta
+}
+```
+
+`e.TextDelta()`, `e.ThinkingDelta()` and `e.SignatureDelta()` cover the other
+increments, and `e.Raw` holds the whole event verbatim. The existing
+`e.Delta.Text` path is unchanged. See `examples/streaming_tools/`.
+
 ### Reading events
 
 Typed fields on an `Event` are **best-effort**; `Event.Raw` is authoritative.
