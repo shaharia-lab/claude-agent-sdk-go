@@ -691,37 +691,48 @@ func parseLine(line []byte) (Event, error) {
 	copy(raw, line)
 	event := Event{Type: envelope.Type, Raw: raw}
 
+	// Decoding is best-effort by design. encoding/json populates every field it
+	// processed successfully before returning an error, so a single unexpected
+	// field must degrade that field rather than nil the whole message. Before
+	// #23 a type mismatch anywhere — one array of objects landing in a []string —
+	// discarded the entire typed value and left only Raw. DecodeErr records what
+	// went wrong so drift stays observable instead of silent; Raw is always
+	// authoritative.
 	switch envelope.Type {
 	case TypeAssistant:
 		var m AssistantMessage
-		if err := json.Unmarshal(line, &m); err == nil {
-			event.Assistant = &m
-		}
+		event.DecodeErr = json.Unmarshal(line, &m)
+		event.Assistant = &m
 	case TypeStreamEvent:
 		var m StreamEventMessage
-		if err := json.Unmarshal(line, &m); err == nil {
-			event.StreamEvent = &m
-		}
+		event.DecodeErr = json.Unmarshal(line, &m)
+		event.StreamEvent = &m
 	case TypeResult:
 		var m Result
-		if err := json.Unmarshal(line, &m); err == nil {
-			event.Result = &m
-		}
-	case TypeSystem:
-		var m SystemMessage
-		if err := json.Unmarshal(line, &m); err == nil {
-			event.System = &m
-		}
+		event.DecodeErr = json.Unmarshal(line, &m)
+		event.Result = &m
 	case TypeToolProgress:
 		var m ToolProgressMessage
-		if err := json.Unmarshal(line, &m); err == nil {
-			event.ToolProgress = &m
+		event.DecodeErr = json.Unmarshal(line, &m)
+		event.ToolProgress = &m
+
+	case TypeSystem:
+		var m SystemMessage
+		event.DecodeErr = json.Unmarshal(line, &m)
+		event.System = &m
+
+		// Task and hook lifecycle messages arrive as system subtypes, never as
+		// top-level types — dispatch on the subtype so Event.Task can actually
+		// be populated (#23).
+		switch m.Subtype {
+		case SubtypeTaskStarted, SubtypeTaskProgress, SubtypeTaskNotification:
+			var tm TaskMessage
+			if err := json.Unmarshal(line, &tm); err != nil && event.DecodeErr == nil {
+				event.DecodeErr = err
+			}
+			event.Task = &tm
 		}
-	case TypeTaskStarted, TypeTaskProgress, TypeTaskNotification:
-		var m TaskMessage
-		if err := json.Unmarshal(line, &m); err == nil {
-			event.Task = &m
-		}
+
 		// TypeRateLimitEvent and future types: Raw only.
 	}
 

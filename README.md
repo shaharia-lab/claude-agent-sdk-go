@@ -115,6 +115,41 @@ r2, err := claude.Run(ctx, "What is my name?",
 )
 ```
 
+### Reading events
+
+Typed fields on an `Event` are **best-effort**; `Event.Raw` is authoritative.
+
+```go
+for ev := range stream.Events() {
+    switch ev.Type {
+    case claude.TypeAssistant:
+        fmt.Println(ev.Assistant.Text())
+    case claude.TypeSystem:
+        // Task and hook lifecycle messages arrive here, as SUBTYPES —
+        // there is no top-level "task_started" message on the wire.
+        switch ev.System.Subtype {
+        case claude.SubtypeInit:
+            fmt.Println(ev.System.Plugins)
+        case claude.SubtypeTaskStarted:
+            fmt.Println(ev.Task.TaskID)
+        }
+    case claude.TypeResult:
+        fmt.Println(ev.Result.Result, ev.Result.ModelUsages)
+    }
+
+    if ev.DecodeErr != nil {
+        // One field decoded partially; the rest is still populated and Raw is
+        // complete. Useful for spotting protocol drift.
+        log.Printf("partial decode: %v", ev.DecodeErr)
+    }
+}
+```
+
+A single unexpected field degrades that field only — it never nils the whole
+message. Per-model usage lives in `Result.ModelUsages` (wire key `modelUsage`,
+camelCase fields), and server-side tool counters are under
+`Result.Usage.ServerToolUse`.
+
 ### What the connected CLI supports
 
 The SDK completes an `initialize` handshake with the CLI before the first turn

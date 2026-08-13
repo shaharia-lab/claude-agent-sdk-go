@@ -50,9 +50,12 @@ def ack(request_id):
     body = {"models": [{"value": "fake", "displayName": "Fake"}], "account": {"apiProvider": "fake"}}
     out = {"type": "control_response",
            "response": {"subtype": "success", "request_id": request_id, "response": body}}
+    # Mark BEFORE flushing: once the response is on the wire the SDK may write
+    # the user message immediately, and the reader thread would log it ahead of
+    # a marker recorded afterwards — a race in the test, not in the SDK.
+    record({"type": "__ack_sent__"})
     sys.stdout.write(json.dumps(out) + "\n")
     sys.stdout.flush()
-    record({"type": "__ack_sent__"})
 
 for line in sys.stdin:
     line = line.strip()
