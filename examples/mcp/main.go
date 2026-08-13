@@ -67,8 +67,10 @@ func main() {
 	fmt.Fprintf(os.Stderr, "MCP server listening at %s\n", mcpCfg.URL)
 
 	// ── 3. Ask claude to use the tool ─────────────────────────────────────────
-	// MCP servers in bidirectional mode are passed via sdkMcpServers in the
-	// initialize message (not via --mcp-config CLI flag).
+	// The server is reached over its loopback HTTP URL, passed to the CLI via
+	// --mcp-config. It is deliberately NOT named in the initialize message's
+	// sdkMcpServers — that key marks a server as SDK-hosted, and the CLI would
+	// then drop this transport and route tool calls back over mcp_message (#38).
 	result, err := claude.Run(ctx,
 		"Use the current_time tool to tell me the current time in Tokyo (Asia/Tokyo) and New York (America/New_York).",
 		claude.WithModel("claude-haiku-4-5-20251001"),

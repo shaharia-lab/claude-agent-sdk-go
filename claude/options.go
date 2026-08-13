@@ -890,8 +890,10 @@ func (o *Options) buildArgs() []string {
 		args = append(args, "--setting-sources", strings.Join(srcs, ","))
 	}
 
-	// MCP servers are passed via --mcp-config as a JSON string.
-	// They are also sent in the sdkMcpServers field of the initialize message.
+	// MCP servers are passed via --mcp-config as a JSON string. This is the ONLY
+	// channel for them: they are deliberately not named in the initialize
+	// message's sdkMcpServers, which is reserved for SDK-hosted servers served
+	// over mcp_message (see initializeMsg in process.go, and #38).
 	if len(o.McpServers) > 0 {
 		mcpCfg := map[string]any{"mcpServers": o.McpServers}
 		if b, err := json.Marshal(mcpCfg); err == nil {

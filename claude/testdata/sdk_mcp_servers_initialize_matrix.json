@@ -1,0 +1,53 @@
+{
+  "capturedFrom": "claude 2.1.224 (Claude Code)",
+  "request": "control_request subtype=initialize, varying only sdkMcpServers",
+  "note": "The CLI accepts sdkMcpServers only as an array of strings. Any object or array-of-objects fails the ENTIRE initialize, which silently disables hooks, agents, system prompt and output format. Naming servers here is also wrong for this SDK: it marks them SDK-hosted, so the CLI drops their transports and routes tool calls over mcp_message control_requests, which this SDK does not implement \u2014 measured live, the server's tools vanish from the session. Hence the key is never sent. See issue #38.",
+  "cases": [
+    {
+      "description": "key absent entirely \u2014 the shape this SDK sends",
+      "omitted": true,
+      "cliSubtype": "success"
+    },
+    {
+      "description": "empty array",
+      "sdkMcpServers": [],
+      "cliSubtype": "success"
+    },
+    {
+      "description": "array of server names",
+      "sdkMcpServers": [
+        "time-server"
+      ],
+      "cliSubtype": "success"
+    },
+    {
+      "description": "empty object",
+      "sdkMcpServers": {},
+      "cliSubtype": "error",
+      "cliError": "initialize: sdkMcpServers and webSearchIsolationExemptMcpServers must be arrays of strings"
+    },
+    {
+      "description": "object of transport configs \u2014 the pre-#38 shape",
+      "sdkMcpServers": {
+        "time-server": {
+          "type": "http",
+          "url": "http://127.0.0.1:1234"
+        }
+      },
+      "cliSubtype": "error",
+      "cliError": "initialize: sdkMcpServers and webSearchIsolationExemptMcpServers must be arrays of strings"
+    },
+    {
+      "description": "array of transport config objects",
+      "sdkMcpServers": [
+        {
+          "name": "time-server",
+          "type": "http",
+          "url": "http://127.0.0.1:1234"
+        }
+      ],
+      "cliSubtype": "error",
+      "cliError": "initialize: sdkMcpServers and webSearchIsolationExemptMcpServers must be arrays of strings"
+    }
+  ]
+}

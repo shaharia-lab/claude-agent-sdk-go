@@ -617,25 +617,101 @@ func TestHandleControlRequest_HookCallback_HookError(t *testing.T) {
 	}
 }
 
-// The CLI rejects the entire initialize when sdkMcpServers is an empty object
-// ("sdkMcpServers and webSearchIsolationExemptMcpServers must be arrays of
-// strings"), which would take hooks down with it, so the key is omitted when
-// there are no servers.
-func TestInitializeMsg_OmitsEmptySdkMcpServers(t *testing.T) {
-	msg := initializeMsg(defaultOptions(), map[string]any{})
+// sdkMcpServers must never appear in the initialize request, with or without
+// servers configured.
+//
+// The key declares SDK-*hosted* servers, whose JSON-RPC traffic the CLI routes
+// back over `mcp_message` control_requests. This SDK has none: every server it
+// builds is a real loopback HTTP listener or a stdio subprocess, delivered to
+// the CLI through --mcp-config and dialled directly.
+//
+// Sending the map (the pre-#38 behaviour) fails the whole initialize and
+// silently disables hooks, agents, system prompt and output format. Sending the
+// names instead makes initialize succeed but strips the servers' transports, so
+// their tools disappear from the session entirely. Both were measured against a
+// real CLI — see testdata/sdk_mcp_servers_initialize_matrix.json.
+func TestInitializeMsg_NeverSendsSdkMcpServers(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		servers map[string]any
+	}{
+		{"no servers", nil},
+		{"empty map", map[string]any{}},
+		{"one server", map[string]any{
+			"time-server": McpHTTPServer{Type: "http", URL: "http://127.0.0.1:1234"},
+		}},
+		{"several servers", map[string]any{
+			"time-server": McpHTTPServer{Type: "http", URL: "http://127.0.0.1:1234"},
+			"self-server": McpStdioServer{Type: "stdio", Command: "/bin/echo"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := defaultOptions()
+			opts.McpServers = tc.servers
 
-	b, err := json.Marshal(msg)
+			b, err := json.Marshal(initializeMsg(opts, map[string]any{}))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var envelope struct {
+				Request map[string]json.RawMessage `json:"request"`
+			}
+			if err := json.Unmarshal(b, &envelope); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if raw, present := envelope.Request["sdkMcpServers"]; present {
+				t.Fatalf("sdkMcpServers must never be sent, got %s in %s", raw, b)
+			}
+		})
+	}
+}
+
+// The initialize payload the SDK actually sends must be one the CLI accepts.
+// Pins the shapes measured in testdata/sdk_mcp_servers_initialize_matrix.json:
+// anything the CLI rejects must not be producible by initializeMsg.
+func TestInitializeMsg_MatchesCapturedCLIContract(t *testing.T) {
+	raw, err := os.ReadFile("testdata/sdk_mcp_servers_initialize_matrix.json")
 	if err != nil {
-		t.Fatalf("marshal: %v", err)
+		t.Fatalf("read matrix: %v", err)
 	}
-	var envelope struct {
-		Request map[string]json.RawMessage `json:"request"`
+	var matrix struct {
+		Cases []struct {
+			Payload  json.RawMessage `json:"sdkMcpServers"`
+			Omitted  bool            `json:"omitted"`
+			Subtype  string          `json:"cliSubtype"`
+			CLIError string          `json:"cliError"`
+		} `json:"cases"`
 	}
-	if err := json.Unmarshal(b, &envelope); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if err := json.Unmarshal(raw, &matrix); err != nil {
+		t.Fatalf("unmarshal matrix: %v", err)
 	}
-	if _, present := envelope.Request["sdkMcpServers"]; present {
-		t.Fatalf("expected sdkMcpServers to be omitted when empty, got %s", b)
+	if len(matrix.Cases) == 0 {
+		t.Fatal("matrix is empty")
+	}
+
+	// The shape the SDK emits: the key absent entirely.
+	var omittedAccepted bool
+	for _, c := range matrix.Cases {
+		if c.Omitted {
+			if c.Subtype != "success" {
+				t.Fatalf("captured CLI rejects an omitted sdkMcpServers (%s) — the SDK's payload is no longer valid", c.CLIError)
+			}
+			omittedAccepted = true
+		}
+	}
+	if !omittedAccepted {
+		t.Fatal("matrix has no case for an omitted sdkMcpServers")
+	}
+
+	// Every object-shaped payload must be recorded as rejected; if a future CLI
+	// starts accepting one, this test is the prompt to revisit the decision.
+	for _, c := range matrix.Cases {
+		if c.Omitted || len(c.Payload) == 0 {
+			continue
+		}
+		if c.Payload[0] == '{' && c.Subtype != "error" {
+			t.Fatalf("captured CLI now accepts an object sdkMcpServers (%s) — revisit #38", c.Payload)
+		}
 	}
 }
 
