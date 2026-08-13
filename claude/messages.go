@@ -61,6 +61,7 @@ const (
 	SubtypeTaskStarted      = "task_started"
 	SubtypeTaskProgress     = "task_progress"
 	SubtypeTaskNotification = "task_notification"
+	SubtypeTaskUpdated      = "task_updated"
 
 	// Hook lifecycle.
 	SubtypeHookStarted  = "hook_started"
@@ -701,12 +702,17 @@ type SystemMessage struct {
 	Type    MessageType `json:"type"`
 	Subtype string      `json:"subtype"`
 
-	// Status subtype fields.
-	Status  string `json:"status,omitempty"`
-	Message string `json:"message,omitempty"`
+	// Status subtype field.
+	Status string `json:"status,omitempty"`
+
+	// Error carries the reason for a synthetic system/error event — one this
+	// SDK generates when the subprocess fails without sending a result. It is
+	// not a wire field: the CLI never sends system/error.
+	Error string `json:"-"`
 
 	// Init subtype fields — populated when Subtype == SubtypeInit.
 	SessionID         string   `json:"session_id,omitempty"`
+	UUID              string   `json:"uuid,omitempty"`
 	CWD               string   `json:"cwd,omitempty"`
 	Model             string   `json:"model,omitempty"`
 	Tools             []string `json:"tools,omitempty"`
@@ -720,26 +726,277 @@ type SystemMessage struct {
 	Skills        []string     `json:"skills,omitempty"`
 	Plugins       []PluginInfo `json:"plugins,omitempty"`
 	SlashCommands []string     `json:"slash_commands,omitempty"`
+
+	// Capabilities is the CLI's feature list, e.g. "interrupt_receipt_v1" —
+	// the same list Session.Capabilities() serves. It arrives here rather than
+	// in the initialize control response (#19), so it is unknown until the
+	// first turn starts.
+	Capabilities []string `json:"capabilities,omitempty"`
+
+	// MCPServers reports each configured MCP server and whether it connected.
+	MCPServers []MCPServerInit `json:"mcp_servers,omitempty"`
+
+	// OutputStyle is the active output style, e.g. "default".
+	OutputStyle string `json:"output_style,omitempty"`
+
+	// FastModeState is "on" or "off"; FastModeDisabledReason says why when the
+	// CLI turned it off.
+	FastModeState          string `json:"fast_mode_state,omitempty"`
+	FastModeDisabledReason string `json:"fast_mode_disabled_reason,omitempty"`
+}
+
+// MCPServerInit is one MCP server as reported on system/init.
+type MCPServerInit struct {
+	Name string `json:"name"`
+	// Status is "connected", "pending", "failed", …
+	Status string `json:"status"`
 }
 
 // ─── Tool progress message ────────────────────────────────────────────────────
 
-// ToolProgressMessage carries incremental progress updates from a running tool.
+// ToolProgressMessage reports that a tool is still running.
+//
+// The field set is taken from the CLI's own emit code rather than from a
+// specification: it has three shapes (a Bash/PowerShell progress tick, a REPL
+// call, and a bare heartbeat), which share everything below. The `progress` and
+// `message` fields this struct used to declare exist nowhere on the wire.
 type ToolProgressMessage struct {
 	Type      MessageType `json:"type"`
 	ToolUseID string      `json:"tool_use_id"`
-	Progress  float64     `json:"progress,omitempty"`
-	Message   string      `json:"message,omitempty"`
+
+	// ToolName is the tool still running, e.g. "Bash" or "REPL".
+	ToolName string `json:"tool_name,omitempty"`
+
+	// ElapsedTimeSeconds is how long it has been running.
+	ElapsedTimeSeconds float64 `json:"elapsed_time_seconds,omitempty"`
+
+	// Heartbeat marks a keep-alive tick that reports no new progress.
+	Heartbeat bool `json:"heartbeat,omitempty"`
+
+	// TaskID is set when the tool runs as a background task.
+	TaskID string `json:"task_id,omitempty"`
+
+	ParentToolUseID *string `json:"parent_tool_use_id,omitempty"`
+	SessionID       string  `json:"session_id,omitempty"`
+	UUID            string  `json:"uuid,omitempty"`
+
+	// Raw is the complete message; REPL ticks carry a repl_call object this
+	// struct does not model.
+	Raw json.RawMessage `json:"-"`
 }
 
-// ─── Task message ─────────────────────────────────────────────────────────────
+// ─── Task lifecycle messages ──────────────────────────────────────────────────
 
-// TaskMessage carries task lifecycle events (started, progress, notification).
-type TaskMessage struct {
-	Type    MessageType `json:"type"`
-	TaskID  string      `json:"task_id,omitempty"`
-	Status  string      `json:"status,omitempty"`
-	Message string      `json:"message,omitempty"`
+// TaskStatus is the state of a background task.
+//
+// Two vocabularies overlap here: task_updated reports the raw lifecycle state
+// (including "killed"), while task_notification reports the user-facing outcome
+// (where a killed task becomes "stopped"). Use IsTerminal rather than comparing
+// against one vocabulary.
+type TaskStatus string
+
+// Task statuses, spanning both the task_updated and task_notification
+// vocabularies.
+const (
+	TaskPending   TaskStatus = "pending"
+	TaskRunning   TaskStatus = "running"
+	TaskPaused    TaskStatus = "paused"
+	TaskCompleted TaskStatus = "completed"
+	TaskFailed    TaskStatus = "failed"
+	// TaskStopped is the notification vocabulary's name for a task the caller
+	// stopped; task_updated calls the same event "killed".
+	TaskStopped TaskStatus = "stopped"
+	TaskKilled  TaskStatus = "killed"
+)
+
+// TerminalTaskStatuses is the set of statuses after which a task produces no
+// further updates. It spans both vocabularies deliberately.
+var TerminalTaskStatuses = map[TaskStatus]bool{
+	TaskCompleted: true,
+	TaskFailed:    true,
+	TaskStopped:   true,
+	TaskKilled:    true,
+}
+
+// IsTerminal reports whether the task has finished for good.
+//
+// A consumer tracking active tasks must clear its entry on a terminal status
+// from *either* a TaskUpdatedMessage or a TaskNotificationMessage. A stopped
+// task reports "killed" via task_updated, and the matching notification is not
+// guaranteed — so waiting only for the notification can leak the task forever.
+func (s TaskStatus) IsTerminal() bool { return TerminalTaskStatuses[s] }
+
+// TaskUsage is what a task has consumed so far.
+type TaskUsage struct {
+	TotalTokens int   `json:"total_tokens,omitempty"`
+	ToolUses    int   `json:"tool_uses,omitempty"`
+	DurationMS  int64 `json:"duration_ms,omitempty"`
+}
+
+// TaskStartedMessage announces a background task, as system/task_started.
+type TaskStartedMessage struct {
+	Subtype   string `json:"subtype"`
+	TaskID    string `json:"task_id"`
+	ToolUseID string `json:"tool_use_id,omitempty"`
+	// Description is the human-readable label, e.g. "Sleep 20 seconds then echo".
+	Description string `json:"description,omitempty"`
+	// TaskType is the kind of task, e.g. "local_bash".
+	TaskType string `json:"task_type,omitempty"`
+	// SubagentType and WorkflowName are set for agent and workflow tasks.
+	SubagentType string `json:"subagent_type,omitempty"`
+	WorkflowName string `json:"workflow_name,omitempty"`
+
+	SessionID string          `json:"session_id,omitempty"`
+	UUID      string          `json:"uuid,omitempty"`
+	Raw       json.RawMessage `json:"-"`
+}
+
+// TaskProgressMessage reports a running task's progress, as
+// system/task_progress.
+type TaskProgressMessage struct {
+	Subtype      string `json:"subtype"`
+	TaskID       string `json:"task_id"`
+	ToolUseID    string `json:"tool_use_id,omitempty"`
+	Description  string `json:"description,omitempty"`
+	SubagentType string `json:"subagent_type,omitempty"`
+
+	Usage TaskUsage `json:"usage,omitempty"`
+	// LastToolName is the most recent tool the task ran.
+	LastToolName string `json:"last_tool_name,omitempty"`
+	Summary      string `json:"summary,omitempty"`
+
+	SessionID string          `json:"session_id,omitempty"`
+	UUID      string          `json:"uuid,omitempty"`
+	Raw       json.RawMessage `json:"-"`
+}
+
+// TaskNotificationMessage reports a task's outcome, as
+// system/task_notification.
+type TaskNotificationMessage struct {
+	Subtype   string     `json:"subtype"`
+	TaskID    string     `json:"task_id"`
+	ToolUseID string     `json:"tool_use_id,omitempty"`
+	Status    TaskStatus `json:"status,omitempty"`
+
+	// OutputFile is where the task's full output was written.
+	OutputFile string    `json:"output_file,omitempty"`
+	Summary    string    `json:"summary,omitempty"`
+	Usage      TaskUsage `json:"usage,omitempty"`
+
+	SessionID string          `json:"session_id,omitempty"`
+	UUID      string          `json:"uuid,omitempty"`
+	Raw       json.RawMessage `json:"-"`
+}
+
+// TaskUpdatedMessage carries a change to a task's state, as
+// system/task_updated.
+//
+// This is the message a consumer cannot skip: a task stopped via TaskStop
+// reports "killed" here, and the corresponding notification is not guaranteed
+// to follow.
+type TaskUpdatedMessage struct {
+	Subtype string `json:"subtype"`
+	TaskID  string `json:"task_id"`
+
+	// Patch is the raw change, e.g. {"status":"completed","end_time":…}. It is
+	// kept whole because the CLI puts arbitrary task fields in it.
+	Patch json.RawMessage `json:"patch,omitempty"`
+
+	// Status is the task's new state. On the wire it lives inside patch, not at
+	// the top level — parseLine lifts it out so callers do not have to.
+	Status TaskStatus `json:"-"`
+
+	SessionID string          `json:"session_id,omitempty"`
+	UUID      string          `json:"uuid,omitempty"`
+	Raw       json.RawMessage `json:"-"`
+}
+
+// ─── Hook lifecycle messages ──────────────────────────────────────────────────
+
+// HookLifecycleMessage reports a hook starting, progressing, or responding, as
+// system/hook_started, system/hook_progress or system/hook_response.
+//
+// The CLI only emits these when hook events are enabled, so a session that
+// configures hooks does not necessarily observe them (#31).
+type HookLifecycleMessage struct {
+	Subtype string `json:"subtype"`
+	// HookEvent is the hook that fired, e.g. "PreToolUse".
+	HookEvent string `json:"hook_event,omitempty"`
+
+	SessionID string          `json:"session_id,omitempty"`
+	UUID      string          `json:"uuid,omitempty"`
+	Raw       json.RawMessage `json:"-"`
+}
+
+// ─── Rate limit event ─────────────────────────────────────────────────────────
+
+// RateLimitStatus is whether requests are currently being served. It is a named
+// string, not a closed enum — an unrecognised status decodes through.
+type RateLimitStatus string
+
+// Rate limit statuses.
+const (
+	RateLimitAllowed        RateLimitStatus = "allowed"
+	RateLimitAllowedWarning RateLimitStatus = "allowed_warning"
+	RateLimitRejected       RateLimitStatus = "rejected"
+)
+
+// RateLimitType is which limit window the report concerns. Open named string,
+// for the same reason as RateLimitStatus.
+type RateLimitType string
+
+// Rate limit windows.
+const (
+	RateLimitFiveHour       RateLimitType = "five_hour"
+	RateLimitSevenDay       RateLimitType = "seven_day"
+	RateLimitSevenDayOpus   RateLimitType = "seven_day_opus"
+	RateLimitSevenDaySonnet RateLimitType = "seven_day_sonnet"
+	RateLimitOverage        RateLimitType = "overage"
+)
+
+// RateLimitInfo is the rate-limit state carried by a rate_limit_event.
+//
+// Its field names are camelCase on the wire — like modelUsage, and unlike the
+// snake_case used by the surrounding message. Verified against a captured
+// event.
+type RateLimitInfo struct {
+	Status RateLimitStatus `json:"status,omitempty"`
+	// ResetsAt is a Unix timestamp in seconds.
+	ResetsAt      int64         `json:"resetsAt,omitempty"`
+	RateLimitType RateLimitType `json:"rateLimitType,omitempty"`
+	// Utilization is the fraction of the window consumed, when sent.
+	Utilization float64 `json:"utilization,omitempty"`
+
+	// Overage fields describe billing beyond the included allowance.
+	OverageStatus         string `json:"overageStatus,omitempty"`
+	OverageResetsAt       int64  `json:"overageResetsAt,omitempty"`
+	OverageDisabledReason string `json:"overageDisabledReason,omitempty"`
+	IsUsingOverage        bool   `json:"isUsingOverage,omitempty"`
+
+	ErrorCode string `json:"errorCode,omitempty"`
+
+	// Raw keeps the whole info object, including fields not modelled here.
+	Raw json.RawMessage `json:"-"`
+}
+
+// UnmarshalJSON keeps the verbatim payload in Raw before decoding.
+func (i *RateLimitInfo) UnmarshalJSON(data []byte) error {
+	i.Raw = append(i.Raw[:0], data...)
+
+	type infoFields RateLimitInfo
+	return json.Unmarshal(data, (*infoFields)(i))
+}
+
+// Limited reports whether requests are currently being refused.
+func (i *RateLimitInfo) Limited() bool { return i.Status == RateLimitRejected }
+
+// RateLimitEvent reports a change in rate-limit state. The CLI sends one at the
+// start of a turn and whenever the state changes.
+type RateLimitEvent struct {
+	Type          MessageType   `json:"type"`
+	RateLimitInfo RateLimitInfo `json:"rate_limit_info"`
+	SessionID     string        `json:"session_id,omitempty"`
+	UUID          string        `json:"uuid,omitempty"`
 }
 
 // ─── Top-level Event ──────────────────────────────────────────────────────────
@@ -747,14 +1004,21 @@ type TaskMessage struct {
 // Event is the top-level value yielded from Query().
 //
 // Type is always set. The corresponding typed field is non-nil for known types:
-//   - TypeAssistant     → Assistant
-//   - TypeUser          → User
-//   - TypeStreamEvent   → StreamEvent
-//   - TypeResult        → Result
-//   - TypeSystem        → System
+//   - TypeAssistant       → Assistant
+//   - TypeUser            → User
+//   - TypeStreamEvent     → StreamEvent
+//   - TypeResult          → Result
+//   - TypeSystem          → System
+//   - TypeRateLimitEvent  → RateLimit
+//   - TypeToolProgress    → ToolProgress
 //
-// For unknown types (e.g. TypeRateLimitEvent), only Raw is set so callers can
-// handle forward-compatibility themselves.
+// System messages additionally populate one of the lifecycle fields according
+// to their subtype: task_started → TaskStarted, task_progress → TaskProgress,
+// task_notification → TaskNotification, task_updated → TaskUpdated, and the
+// hook_* subtypes → HookLifecycle. System is always set alongside them.
+//
+// For unknown types, only Raw is set so callers can handle
+// forward-compatibility themselves.
 type Event struct {
 	Type         MessageType
 	Assistant    *AssistantMessage
@@ -763,8 +1027,19 @@ type Event struct {
 	Result       *Result
 	System       *SystemMessage
 	ToolProgress *ToolProgressMessage
-	Task         *TaskMessage
-	Raw          json.RawMessage
+	RateLimit    *RateLimitEvent
+
+	// Task lifecycle, populated from the matching system subtype.
+	TaskStarted      *TaskStartedMessage
+	TaskProgress     *TaskProgressMessage
+	TaskNotification *TaskNotificationMessage
+	TaskUpdated      *TaskUpdatedMessage
+
+	// HookLifecycle is populated from the hook_started/hook_progress/
+	// hook_response subtypes.
+	HookLifecycle *HookLifecycleMessage
+
+	Raw json.RawMessage
 
 	// DecodeErr records why a typed field decoded only partially, if it did.
 	// Typed fields are best-effort: on a type mismatch the fields that did

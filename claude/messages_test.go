@@ -137,8 +137,13 @@ func TestParseLine_ResultWithModelUsages(t *testing.T) {
 	}
 }
 
+// This test used to assert `progress: 0.5` and `message: "halfway done"` against
+// a hand-written line. Neither field exists on the wire — the CLI emits
+// tool_name/elapsed_time_seconds/heartbeat — so the test passed while proving
+// nothing, which is the fabricated-fixture defect class from #23. The real
+// shape is asserted by TestParseLine_ToolProgressRealFields (#29).
 func TestParseLine_ToolProgress(t *testing.T) {
-	line := `{"type":"tool_progress","tool_use_id":"tu1","progress":0.5,"message":"halfway done"}`
+	line := `{"type":"tool_progress","tool_use_id":"tu1","tool_name":"Bash","elapsed_time_seconds":0.5}`
 	event, err := parseLine([]byte(line))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -151,12 +156,6 @@ func TestParseLine_ToolProgress(t *testing.T) {
 	}
 	if event.ToolProgress.ToolUseID != "tu1" {
 		t.Fatalf("expected tool_use_id %q, got %q", "tu1", event.ToolProgress.ToolUseID)
-	}
-	if event.ToolProgress.Progress != 0.5 {
-		t.Fatalf("expected progress 0.5, got %f", event.ToolProgress.Progress)
-	}
-	if event.ToolProgress.Message != "halfway done" {
-		t.Fatalf("expected message %q, got %q", "halfway done", event.ToolProgress.Message)
 	}
 }
 
@@ -176,11 +175,11 @@ func TestParseLine_TaskStartedIsASystemSubtype(t *testing.T) {
 	if event.System == nil || event.System.Subtype != SubtypeTaskStarted {
 		t.Fatalf("expected a system/%s message, got %+v", SubtypeTaskStarted, event.System)
 	}
-	if event.Task == nil {
-		t.Fatal("expected Task to be populated from the system subtype")
+	if event.TaskStarted == nil {
+		t.Fatal("expected TaskStarted to be populated from the system subtype")
 	}
-	if event.Task.TaskID == "" {
-		t.Errorf("task_id did not decode: %+v", event.Task)
+	if event.TaskStarted.TaskID == "" {
+		t.Errorf("task_id did not decode: %+v", event.TaskStarted)
 	}
 }
 
@@ -242,20 +241,26 @@ func TestParseLine_SystemInitWithPlugins(t *testing.T) {
 	}
 }
 
+// A message type this SDK does not model at all keeps Raw and nothing else.
+// rate_limit_event used to be the example here; it is typed as of #29, so this
+// uses a type the CLI has never sent.
 func TestParseLine_UnknownType_RawOnly(t *testing.T) {
-	line := `{"type":"rate_limit_event","retry_after":5}`
+	line := `{"type":"telepathy_event","retry_after":5}`
 	event, err := parseLine([]byte(line))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if event.Type != TypeRateLimitEvent {
-		t.Fatalf("expected type %q, got %q", TypeRateLimitEvent, event.Type)
+	if event.Type != MessageType("telepathy_event") {
+		t.Fatalf("unexpected type %q", event.Type)
 	}
 	if event.Raw == nil {
 		t.Fatal("expected Raw to be non-nil")
 	}
 	// Typed fields should all be nil.
-	if event.Assistant != nil || event.StreamEvent != nil || event.Result != nil || event.System != nil || event.ToolProgress != nil || event.Task != nil {
+	if event.Assistant != nil || event.User != nil || event.StreamEvent != nil ||
+		event.Result != nil || event.System != nil || event.ToolProgress != nil ||
+		event.RateLimit != nil || event.TaskStarted != nil || event.TaskUpdated != nil ||
+		event.TaskNotification != nil || event.TaskProgress != nil || event.HookLifecycle != nil {
 		t.Fatal("expected all typed fields to be nil for unknown type")
 	}
 }
@@ -967,5 +972,367 @@ func TestParseLine_ModelUsageIdentityFields(t *testing.T) {
 		if mu.Provider != ProviderFirstParty {
 			t.Errorf("%s: expected provider %q, got %q", model, ProviderFirstParty, mu.Provider)
 		}
+	}
+}
+
+// ─── Task, rate-limit, init and hook lifecycle payloads (#29) ─────────────────
+
+// readLifecycle returns a captured background-task sequence in arrival order.
+func readLifecycle(t *testing.T, name string) []Event {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join("testdata", "messages", name))
+	if err != nil {
+		t.Fatalf("read %s: %v", name, err)
+	}
+
+	var events []Event
+	for i, line := range bytes.Split(bytes.TrimSpace(data), []byte("\n")) {
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		event, err := parseLine(line)
+		if err != nil {
+			t.Fatalf("%s line %d: parseLine: %v", name, i, err)
+		}
+		if event.DecodeErr != nil {
+			t.Fatalf("%s line %d: captured line did not decode cleanly: %v", name, i, event.DecodeErr)
+		}
+		events = append(events, event)
+	}
+	if len(events) == 0 {
+		t.Fatalf("%s is empty", name)
+	}
+	return events
+}
+
+// The whole point of typing these: a caller must be able to track a background
+// task to its terminal state without touching raw JSON. The tracker below is
+// what a real consumer writes — add on task_started, clear on any terminal
+// status — and it must end empty for both a completed and a killed task.
+func TestTaskLifecycle_TrackedToTerminalState(t *testing.T) {
+	for _, tc := range []struct {
+		fixture    string
+		wantStatus TaskStatus
+	}{
+		{"task_lifecycle_completed.jsonl", TaskCompleted},
+		{"task_lifecycle_killed.jsonl", TaskKilled},
+	} {
+		t.Run(tc.fixture, func(t *testing.T) {
+			active := map[string]string{}
+			var sawTerminal TaskStatus
+
+			for _, event := range readLifecycle(t, tc.fixture) {
+				switch {
+				case event.TaskStarted != nil:
+					active[event.TaskStarted.TaskID] = event.TaskStarted.Description
+
+				case event.TaskUpdated != nil:
+					if event.TaskUpdated.Status.IsTerminal() {
+						delete(active, event.TaskUpdated.TaskID)
+						if sawTerminal == "" {
+							sawTerminal = event.TaskUpdated.Status
+						}
+					}
+
+				case event.TaskNotification != nil:
+					if event.TaskNotification.Status.IsTerminal() {
+						delete(active, event.TaskNotification.TaskID)
+					}
+				}
+			}
+
+			if len(active) != 0 {
+				t.Errorf("task tracking leaked %d task(s): %v", len(active), active)
+			}
+			if sawTerminal != tc.wantStatus {
+				t.Errorf("expected terminal status %q from task_updated, got %q", tc.wantStatus, sawTerminal)
+			}
+		})
+	}
+}
+
+// task_updated carries the new status inside `patch`, not at the top level.
+// A consumer reading a top-level `status` sees nothing at all.
+func TestTaskUpdated_StatusComesFromPatch(t *testing.T) {
+	var updated *TaskUpdatedMessage
+	for _, event := range readLifecycle(t, "task_lifecycle_killed.jsonl") {
+		if event.TaskUpdated != nil {
+			updated = event.TaskUpdated
+		}
+	}
+	if updated == nil {
+		t.Fatal("no task_updated in the captured sequence")
+	}
+
+	if updated.Status != TaskKilled {
+		t.Errorf("expected status %q lifted from the patch, got %q", TaskKilled, updated.Status)
+	}
+	if updated.TaskID == "" {
+		t.Error("task_id did not decode")
+	}
+
+	// Prove the status is not available at the top level — that's why it is lifted.
+	var wire struct {
+		Status string          `json:"status"`
+		Patch  json.RawMessage `json:"patch"`
+	}
+	if err := json.Unmarshal(updated.Raw, &wire); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	if wire.Status != "" {
+		t.Errorf("captured task_updated has a top-level status %q; revisit the lift", wire.Status)
+	}
+	if len(wire.Patch) == 0 {
+		t.Error("captured task_updated has no patch")
+	}
+}
+
+// The two vocabularies overlap: a stopped task reports "killed" via task_updated
+// and "stopped" via task_notification. Both must count as terminal, which is
+// why TerminalTaskStatuses spans them.
+func TestTaskStatus_TerminalSpansBothVocabularies(t *testing.T) {
+	for _, s := range []TaskStatus{TaskCompleted, TaskFailed, TaskStopped, TaskKilled} {
+		if !s.IsTerminal() {
+			t.Errorf("%q must be terminal", s)
+		}
+	}
+	for _, s := range []TaskStatus{TaskPending, TaskRunning, TaskPaused, "invented"} {
+		if s.IsTerminal() {
+			t.Errorf("%q must not be terminal", s)
+		}
+	}
+
+	// The captured killed session reports both names for one stop.
+	var updatedStatus, notificationStatus TaskStatus
+	for _, event := range readLifecycle(t, "task_lifecycle_killed.jsonl") {
+		if event.TaskUpdated != nil {
+			updatedStatus = event.TaskUpdated.Status
+		}
+		if event.TaskNotification != nil {
+			notificationStatus = event.TaskNotification.Status
+		}
+	}
+	if updatedStatus != TaskKilled || notificationStatus != TaskStopped {
+		t.Errorf("expected killed/stopped from one stop, got %q/%q", updatedStatus, notificationStatus)
+	}
+}
+
+func TestParseLine_TaskStartedAndNotificationFields(t *testing.T) {
+	var (
+		started      *TaskStartedMessage
+		notification *TaskNotificationMessage
+	)
+	for _, event := range readLifecycle(t, "task_lifecycle_completed.jsonl") {
+		if event.TaskStarted != nil {
+			started = event.TaskStarted
+		}
+		if event.TaskNotification != nil {
+			notification = event.TaskNotification
+		}
+	}
+
+	if started == nil || notification == nil {
+		t.Fatal("captured sequence is missing task_started or task_notification")
+	}
+	if started.ToolUseID == "" || started.Description == "" || started.TaskType == "" {
+		t.Errorf("task_started fields did not decode: %+v", started)
+	}
+	if started.SessionID == "" || started.UUID == "" {
+		t.Errorf("task_started envelope did not decode: %+v", started)
+	}
+	if notification.OutputFile == "" || notification.Summary == "" {
+		t.Errorf("task_notification fields did not decode: %+v", notification)
+	}
+	if notification.TaskID != started.TaskID {
+		t.Errorf("notification %q does not match started %q", notification.TaskID, started.TaskID)
+	}
+	if len(started.Raw) == 0 || len(notification.Raw) == 0 {
+		t.Error("every lifecycle struct must keep its Raw tail")
+	}
+}
+
+// A rate-limit event tells a caller when to back off. Its inner object is
+// camelCase on the wire — like modelUsage, unlike the message around it.
+func TestParseLine_RateLimitEvent(t *testing.T) {
+	event, err := parseLine(readMessageFixture(t, "rate_limit_event.json"))
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if event.Type != TypeRateLimitEvent {
+		t.Fatalf("expected type %q, got %q", TypeRateLimitEvent, event.Type)
+	}
+	if event.RateLimit == nil {
+		t.Fatal("RateLimit is nil — rate_limit_event used to decode to Raw only")
+	}
+	if event.DecodeErr != nil {
+		t.Fatalf("captured payload should decode cleanly: %v", event.DecodeErr)
+	}
+
+	info := event.RateLimit.RateLimitInfo
+	if info.Status != RateLimitAllowed {
+		t.Errorf("expected status %q, got %q", RateLimitAllowed, info.Status)
+	}
+	if info.Limited() {
+		t.Error("an allowed status is not rate limited")
+	}
+	if info.RateLimitType != RateLimitFiveHour {
+		t.Errorf("expected rateLimitType %q, got %q", RateLimitFiveHour, info.RateLimitType)
+	}
+	if info.ResetsAt == 0 {
+		t.Error("resetsAt did not decode — check the camelCase tag")
+	}
+	if info.OverageStatus == "" || info.OverageDisabledReason == "" {
+		t.Errorf("overage fields did not decode: %+v", info)
+	}
+	if len(info.Raw) == 0 {
+		t.Error("RateLimitInfo must keep its Raw tail")
+	}
+	if event.RateLimit.SessionID == "" || event.RateLimit.UUID == "" {
+		t.Error("envelope fields did not decode")
+	}
+}
+
+// The rate-limit vocabularies are open: a window or status this SDK has never
+// heard of must decode through rather than being dropped.
+func TestRateLimit_UnknownValuesSurvive(t *testing.T) {
+	line := []byte(`{"type":"rate_limit_event","rate_limit_info":
+		{"status":"allowed_unless_tuesday","rateLimitType":"seven_day_overage_included",
+		 "utilization":0.42,"unmodelled":"keep me"}}`)
+
+	event, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	info := event.RateLimit.RateLimitInfo
+	if info.Status != "allowed_unless_tuesday" {
+		t.Errorf("unknown status was not preserved: %q", info.Status)
+	}
+	if info.RateLimitType != "seven_day_overage_included" {
+		t.Errorf("unknown rateLimitType was not preserved: %q", info.RateLimitType)
+	}
+	if info.Utilization != 0.42 {
+		t.Errorf("utilization did not decode: %v", info.Utilization)
+	}
+
+	var raw map[string]any
+	if err := json.Unmarshal(info.Raw, &raw); err != nil {
+		t.Fatalf("unmarshal Raw: %v", err)
+	}
+	if raw["unmodelled"] != "keep me" {
+		t.Error("Raw must retain fields the struct does not model")
+	}
+}
+
+// system/init is where the CLI advertises what it can do. capabilities is the
+// list Session.Capabilities() serves (#19) — it is not in the initialize
+// response.
+func TestParseLine_InitCompleteness(t *testing.T) {
+	event, err := parseLine(readMessageFixture(t, "system_init_full.json"))
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if event.System == nil {
+		t.Fatal("System is nil")
+	}
+	if event.DecodeErr != nil {
+		t.Fatalf("captured payload should decode cleanly: %v", event.DecodeErr)
+	}
+
+	s := event.System
+	if len(s.Capabilities) == 0 {
+		t.Error("capabilities did not decode; feature detection depends on it")
+	}
+	if len(s.MCPServers) == 0 {
+		t.Fatal("mcp_servers did not decode")
+	}
+	if s.MCPServers[0].Name == "" || s.MCPServers[0].Status == "" {
+		t.Errorf("mcp_servers entries did not decode: %+v", s.MCPServers[0])
+	}
+	if s.OutputStyle == "" {
+		t.Error("output_style did not decode")
+	}
+	if s.FastModeState == "" {
+		t.Error("fast_mode_state did not decode")
+	}
+	if s.UUID == "" {
+		t.Error("uuid did not decode")
+	}
+}
+
+// Hook lifecycle messages arrive as system subtypes carrying the hook that
+// fired. The CLI only emits them when hook events are enabled (#31), so this
+// drives the decoder with the documented shape.
+func TestParseLine_HookLifecycle(t *testing.T) {
+	for _, subtype := range []string{SubtypeHookStarted, SubtypeHookProgress, SubtypeHookResponse} {
+		t.Run(subtype, func(t *testing.T) {
+			line := []byte(`{"type":"system","subtype":"` + subtype +
+				`","hook_event":"PreToolUse","session_id":"s","uuid":"u"}`)
+
+			event, err := parseLine(line)
+			if err != nil {
+				t.Fatalf("parseLine: %v", err)
+			}
+			if event.HookLifecycle == nil {
+				t.Fatal("HookLifecycle was not populated")
+			}
+			if event.HookLifecycle.HookEvent != "PreToolUse" {
+				t.Errorf("hook_event did not decode: %q", event.HookLifecycle.HookEvent)
+			}
+			if event.HookLifecycle.Subtype != subtype {
+				t.Errorf("subtype did not decode: %q", event.HookLifecycle.Subtype)
+			}
+			if len(event.HookLifecycle.Raw) == 0 {
+				t.Error("Raw tail is missing")
+			}
+			// System stays populated alongside the lifecycle field.
+			if event.System == nil {
+				t.Error("System must still be set for a system message")
+			}
+		})
+	}
+}
+
+// tool_progress reports that a tool is still running. Its previous Progress and
+// Message fields existed nowhere on the wire; this asserts the shape the CLI
+// actually emits.
+func TestParseLine_ToolProgressRealFields(t *testing.T) {
+	line := []byte(`{"type":"tool_progress","tool_use_id":"toolu_1","tool_name":"Bash",
+		"parent_tool_use_id":null,"elapsed_time_seconds":12.5,"task_id":"bg1",
+		"session_id":"s","uuid":"u"}`)
+
+	event, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	tp := event.ToolProgress
+	if tp == nil {
+		t.Fatal("ToolProgress is nil")
+	}
+	if tp.ToolName != "Bash" {
+		t.Errorf("tool_name did not decode: %q", tp.ToolName)
+	}
+	if tp.ElapsedTimeSeconds != 12.5 {
+		t.Errorf("elapsed_time_seconds did not decode: %v", tp.ElapsedTimeSeconds)
+	}
+	if tp.TaskID != "bg1" {
+		t.Errorf("task_id did not decode: %q", tp.TaskID)
+	}
+	if len(tp.Raw) == 0 {
+		t.Error("Raw tail is missing")
+	}
+}
+
+// A heartbeat tick reports no progress, only that the tool is alive.
+func TestParseLine_ToolProgressHeartbeat(t *testing.T) {
+	line := []byte(`{"type":"tool_progress","tool_use_id":"toolu_1","tool_name":"WebFetch",
+		"elapsed_time_seconds":30,"heartbeat":true,"session_id":"s","uuid":"u"}`)
+
+	event, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if !event.ToolProgress.Heartbeat {
+		t.Error("heartbeat did not decode")
 	}
 }

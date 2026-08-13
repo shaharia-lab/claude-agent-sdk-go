@@ -721,7 +721,7 @@ func parseLine(line []byte) (Event, error) {
 		event.Result = &m
 	case TypeToolProgress:
 		var m ToolProgressMessage
-		event.DecodeErr = json.Unmarshal(line, &m)
+		decodeSub(line, &m, &m.Raw, &event)
 		event.ToolProgress = &m
 
 	case TypeSystem:
@@ -730,18 +730,54 @@ func parseLine(line []byte) (Event, error) {
 		event.System = &m
 
 		// Task and hook lifecycle messages arrive as system subtypes, never as
-		// top-level types — dispatch on the subtype so Event.Task can actually
-		// be populated (#23).
+		// top-level types — dispatch on the subtype so they can be populated
+		// (#23), each into its own payload type (#29).
 		switch m.Subtype {
-		case SubtypeTaskStarted, SubtypeTaskProgress, SubtypeTaskNotification:
-			var tm TaskMessage
-			if err := json.Unmarshal(line, &tm); err != nil && event.DecodeErr == nil {
-				event.DecodeErr = err
+		case SubtypeTaskStarted:
+			var tm TaskStartedMessage
+			decodeSub(line, &tm, &tm.Raw, &event)
+			event.TaskStarted = &tm
+
+		case SubtypeTaskProgress:
+			var tm TaskProgressMessage
+			decodeSub(line, &tm, &tm.Raw, &event)
+			event.TaskProgress = &tm
+
+		case SubtypeTaskNotification:
+			var tm TaskNotificationMessage
+			decodeSub(line, &tm, &tm.Raw, &event)
+			event.TaskNotification = &tm
+
+		case SubtypeTaskUpdated:
+			var tm TaskUpdatedMessage
+			decodeSub(line, &tm, &tm.Raw, &event)
+
+			// The new status lives inside the patch, not at the top level.
+			// Lifting it out here is what lets a caller treat task_updated and
+			// task_notification the same way — which matters because a stopped
+			// task may report its terminal state only here.
+			if len(tm.Patch) > 0 {
+				var patch struct {
+					Status TaskStatus `json:"status"`
+				}
+				if err := json.Unmarshal(tm.Patch, &patch); err == nil {
+					tm.Status = patch.Status
+				} else if event.DecodeErr == nil {
+					event.DecodeErr = err
+				}
 			}
-			event.Task = &tm
+			event.TaskUpdated = &tm
+
+		case SubtypeHookStarted, SubtypeHookProgress, SubtypeHookResponse:
+			var hm HookLifecycleMessage
+			decodeSub(line, &hm, &hm.Raw, &event)
+			event.HookLifecycle = &hm
 		}
 
-		// TypeRateLimitEvent and future types: Raw only.
+	case TypeRateLimitEvent:
+		var m RateLimitEvent
+		event.DecodeErr = json.Unmarshal(line, &m)
+		event.RateLimit = &m
 	}
 
 	return event, nil
@@ -749,14 +785,27 @@ func parseLine(line []byte) (Event, error) {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+// decodeSub decodes a system subtype's payload into v, stores the verbatim line
+// in raw, and records the first decode error on the event. The subtype payloads
+// are best-effort like every other typed field: a field the CLI adds must
+// degrade that field, not the message.
+func decodeSub(line []byte, v any, raw *json.RawMessage, event *Event) {
+	*raw = append((*raw)[:0], line...)
+	if err := json.Unmarshal(line, v); err != nil && event.DecodeErr == nil {
+		event.DecodeErr = err
+	}
+}
+
 // errorEvent builds a synthetic TypeSystem/error event for process-level failures.
+// The reason goes in Error, not Message: the CLI has no system `message` field,
+// and carrying one invited callers to read it on real system messages (#29).
 func errorEvent(msg string) Event {
 	return Event{
 		Type: TypeSystem,
 		System: &SystemMessage{
 			Type:    TypeSystem,
 			Subtype: "error",
-			Message: msg,
+			Error:   msg,
 		},
 	}
 }
