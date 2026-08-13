@@ -193,15 +193,11 @@ func spawnAndStream(ctx context.Context, opts *Options, prompt string) (*Stream,
 
 			// The CLI advertises its protocol capabilities on system/init, not
 			// in the initialize control response, so they are captured here as
-			// the event flows past (#19).
-			if event.Type == TypeSystem {
-				var sysInit struct {
-					Subtype      string   `json:"subtype"`
-					Capabilities []string `json:"capabilities"`
-				}
-				if json.Unmarshal(line, &sysInit) == nil && sysInit.Subtype == "init" {
-					stream.setCapabilities(sysInit.Capabilities)
-				}
+			// the event flows past (#19). SystemMessage carries the field as of
+			// #29, so this reads the already-decoded event rather than parsing
+			// the same line a second time with its own struct.
+			if event.System != nil && event.System.Subtype == SubtypeInit {
+				stream.setCapabilities(event.System.Capabilities)
 			}
 
 			select {
@@ -755,8 +751,9 @@ func parseLine(line []byte) (Event, error) {
 			// The new status lives inside the patch, not at the top level.
 			// Lifting it out here is what lets a caller treat task_updated and
 			// task_notification the same way — which matters because a stopped
-			// task may report its terminal state only here.
-			if len(tm.Patch) > 0 {
+			// task may report its terminal state only here. A top-level status,
+			// if a future CLI sends one, is authoritative and kept.
+			if tm.Status == "" && len(tm.Patch) > 0 {
 				var patch struct {
 					Status TaskStatus `json:"status"`
 				}

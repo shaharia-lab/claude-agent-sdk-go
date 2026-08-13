@@ -902,9 +902,12 @@ type TaskUpdatedMessage struct {
 	// kept whole because the CLI puts arbitrary task fields in it.
 	Patch json.RawMessage `json:"patch,omitempty"`
 
-	// Status is the task's new state. On the wire it lives inside patch, not at
-	// the top level — parseLine lifts it out so callers do not have to.
-	Status TaskStatus `json:"-"`
+	// Status is the task's new state.
+	//
+	// CLI 2.1.224 sends it inside patch rather than at the top level, so
+	// parseLine lifts it out; the tag stays so that a top-level status, which
+	// the official SDKs' types declare, still decodes and wins over the patch.
+	Status TaskStatus `json:"status,omitempty"`
 
 	SessionID string          `json:"session_id,omitempty"`
 	UUID      string          `json:"uuid,omitempty"`

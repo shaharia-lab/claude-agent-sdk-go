@@ -1336,3 +1336,18 @@ func TestParseLine_ToolProgressHeartbeat(t *testing.T) {
 		t.Error("heartbeat did not decode")
 	}
 }
+
+// A top-level status, which the official SDKs' types declare but CLI 2.1.224
+// does not send, must win over the patch rather than being ignored.
+func TestTaskUpdated_TopLevelStatusWins(t *testing.T) {
+	line := []byte(`{"type":"system","subtype":"task_updated","task_id":"t1",
+		"status":"failed","patch":{"status":"running"}}`)
+
+	event, err := parseLine(line)
+	if err != nil {
+		t.Fatalf("parseLine: %v", err)
+	}
+	if event.TaskUpdated.Status != TaskFailed {
+		t.Errorf("expected the top-level status to win, got %q", event.TaskUpdated.Status)
+	}
+}
